@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+.eslintcache
+pnpm-lock.yaml
+yarn.lock
+package-lock.json
+
+# Vite
+frontend/dist/
+
+# OS
+.DS_Store
+Thumbs.db
