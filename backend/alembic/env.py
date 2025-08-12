@@ -4,6 +4,9 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 from alembic import context
 
+from app.standards import models as standards_models  # <- 등록을 위해 import만 해도 됨
+from app.auth import models as auth_models  # 앞으로 다른 도메인도 여기에 추가
+
 # backend 루트를 sys.path에 추가
 BASE_DIR = pathlib.Path(__file__).resolve().parents[1]
 if str(BASE_DIR) not in sys.path:
