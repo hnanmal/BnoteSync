@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .shared.config import settings
 from .standards.router import router as std_router
+from .wms.router import router as wms_router
 
 app = FastAPI(
     title="Bnote:Sync API", version="0.1.0", openapi_url=f"{settings.API_PREFIX}/openapi.json"
@@ -22,3 +23,4 @@ def healthz():
 
 
 app.include_router(std_router)
+app.include_router(wms_router)

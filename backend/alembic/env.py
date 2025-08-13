@@ -6,6 +6,7 @@ from alembic import context
 
 from app.standards import models as standards_models  # <- 등록을 위해 import만 해도 됨
 from app.auth import models as auth_models  # 앞으로 다른 도메인도 여기에 추가
+from app.wms import models as wms_models
 
 # backend 루트를 sys.path에 추가
 BASE_DIR = pathlib.Path(__file__).resolve().parents[1]
@@ -49,7 +50,13 @@ def run_migrations_online():
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+        is_sqlite = connection.dialect.name == "sqlite"
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+            render_as_batch=is_sqlite,  # ✅ SQLite에서 ALTER를 배치로 우회
+        )
         with context.begin_transaction():
             context.run_migrations()
 
