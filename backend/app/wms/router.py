@@ -1,3 +1,4 @@
+from typing import Iterable, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func, case
@@ -356,3 +357,159 @@ def delete_batch(batch_id: int, db: Session = Depends(get_db)):
         traceback.print_exc()
         db.rollback()
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+# from typing import Optional, Iterable
+# from sqlalchemy import select, or_, and_
+# from sqlalchemy.exc import IntegrityError
+# ... 기존 import 유지
+
+
+# 통합 아이템 목록 (AR/FP/SS 통합, 필터/검색/페이지네이션)
+@router.get("/items")
+def list_items(
+    sources: Optional[str] = Query(None, description="쉼표구분: AR,FP,SS"),
+    search: Optional[str] = Query(None, description="code/name 부분검색"),
+    limit: int | None = Query(200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    src_list: Optional[list[str]] = None
+    if sources:
+        src_list = [s.strip() for s in sources.split(",") if s.strip()]
+
+    q = (
+        select(m.WmsRow.id, m.WmsBatch.source, m.WmsRow.payload_json)
+        .join(m.WmsBatch, m.WmsBatch.id == m.WmsRow.batch_id)
+        .order_by(m.WmsRow.id.desc())
+    )
+    if src_list:
+        q = q.where(m.WmsBatch.source.in_(src_list))
+    rows = db.execute(q).all()
+
+    items = []
+    for r in rows:
+        p = r.payload_json or {}
+        code = (p.get("code") or "") if isinstance(p, dict) else ""
+        name = (p.get("name") or "") if isinstance(p, dict) else ""
+        # 검색
+        if search:
+            s = search.lower()
+            if s not in str(code).lower() and s not in str(name).lower():
+                continue
+        items.append(
+            {
+                "row_id": int(r.id),
+                "source": r.source,
+                "code": code,
+                "name": name,
+                "unit": (p.get("unit") if isinstance(p, dict) else None),
+                "qty": (p.get("qty") if isinstance(p, dict) else None),
+                "_raw": p.get("_raw") if isinstance(p, dict) else None,
+            }
+        )
+    if limit is not None:
+        items = items[offset : offset + limit]
+    return items
+
+
+# 특정 노드의 링크 목록 (현재 할당됨)
+@router.get("/links")
+def list_links(
+    std_release_id: int = Query(...),
+    std_node_uid: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    q = (
+        select(m.StdWmsLink.wms_row_id, m.WmsBatch.source, m.WmsRow.payload_json)
+        .join(m.WmsRow, m.WmsRow.id == m.StdWmsLink.wms_row_id)
+        .join(m.WmsBatch, m.WmsBatch.id == m.WmsRow.batch_id)
+        .where(
+            m.StdWmsLink.std_release_id == std_release_id, m.StdWmsLink.std_node_uid == std_node_uid
+        )
+        .order_by(m.WmsRow.row_index.asc())
+    )
+    rows = db.execute(q).all()
+    out = []
+    for r in rows:
+        p = r.payload_json or {}
+        out.append(
+            {
+                "row_id": int(r.wms_row_id),
+                "source": r.source,
+                "code": (p.get("code") if isinstance(p, dict) else None),
+                "name": (p.get("name") if isinstance(p, dict) else None),
+                "unit": (p.get("unit") if isinstance(p, dict) else None),
+                "qty": (p.get("qty") if isinstance(p, dict) else None),
+            }
+        )
+    return out
+
+
+# 다중 할당
+@router.post("/links/assign")
+def assign_links(
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """
+    body: { "std_release_id": 1, "std_node_uid": "EARTH/...", "row_ids": [1,2,3] }
+    """
+    try:
+        rid = int(payload.get("std_release_id"))
+        uid = str(payload.get("std_node_uid"))
+        ids: Iterable[int] = payload.get("row_ids") or []
+        if not uid or not ids:
+            raise HTTPException(status_code=400, detail="invalid request")
+
+        # 중복 방지: 이미 존재하는 것은 건너뜀
+        existing = set(
+            db.execute(
+                select(m.StdWmsLink.wms_row_id).where(
+                    m.StdWmsLink.std_release_id == rid,
+                    m.StdWmsLink.std_node_uid == uid,
+                    m.StdWmsLink.wms_row_id.in_(ids),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        to_add = [i for i in ids if i not in existing]
+        for row_id in to_add:
+            db.add(m.StdWmsLink(std_release_id=rid, std_node_uid=uid, wms_row_id=row_id))
+        db.commit()
+        return {"added": len(to_add), "skipped": len(existing)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+# 다중 해제
+@router.post("/links/unassign")
+def unassign_links(
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """
+    body: { "std_release_id": 1, "std_node_uid": "EARTH/...", "row_ids": [1,2,3] }
+    """
+    rid = int(payload.get("std_release_id"))
+    uid = str(payload.get("std_node_uid"))
+    ids: Iterable[int] = payload.get("row_ids") or []
+    if not uid or not ids:
+        raise HTTPException(status_code=400, detail="invalid request")
+
+    db.execute(
+        sa_delete(m.StdWmsLink).where(
+            m.StdWmsLink.std_release_id == rid,
+            m.StdWmsLink.std_node_uid == uid,
+            m.StdWmsLink.wms_row_id.in_(ids),
+        )
+    )
+    db.commit()
+    return {"removed": len(list(ids))}

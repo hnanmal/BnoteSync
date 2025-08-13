@@ -46,3 +46,22 @@ export const deleteBatch = async (batchId) => {
   const { data } = await api.delete(`/wms/batches/${batchId}`);
   return data; // { deleted: true, batch_id }
 };
+
+// --- StdGWM용 신규 함수들 ---
+export const listWmsItems = async ({ sources, search, limit, offset = 0 } = {}) => {
+  const params = {};
+  if (sources?.length) params.sources = sources.join(",");
+  if (search) params.search = search;
+  if (limit != null) params.limit = limit;
+  if (offset) params.offset = offset;
+  return (await api.get("/wms/items", { params })).data;
+};
+
+export const listLinks = async ({ rid, uid }) =>
+  (await api.get("/wms/links", { params: { std_release_id: rid, std_node_uid: uid } })).data;
+
+export const assignLinks = async ({ rid, uid, row_ids }) =>
+  (await api.post("/wms/links/assign", { std_release_id: rid, std_node_uid: uid, row_ids })).data;
+
+export const unassignLinks = async ({ rid, uid, row_ids }) =>
+  (await api.post("/wms/links/unassign", { std_release_id: rid, std_node_uid: uid, row_ids })).data;

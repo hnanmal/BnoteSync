@@ -2,6 +2,8 @@ from __future__ import annotations
 from datetime import datetime
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy import (
+    ForeignKeyConstraint,
+    PrimaryKeyConstraint,
     String,
     Integer,
     DateTime,
@@ -48,4 +50,29 @@ class WmsRow(Base):
     __table_args__ = (
         UniqueConstraint("batch_id", "row_index", name="uq_wms_row_batch_index"),
         Index("ix_wms_row_batch", "batch_id"),
+    )
+
+
+class StdWmsLink(Base):
+    __tablename__ = "std_wms_link"
+    std_release_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    std_node_uid: Mapped[str] = mapped_column(String(255), nullable=False)
+    wms_row_id: Mapped[int] = mapped_column(
+        ForeignKey("wms_row.id", ondelete="CASCADE"), nullable=False
+    )
+    assigned_at: Mapped[datetime | None] = mapped_column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "std_release_id", "std_node_uid", "wms_row_id", name="pk_std_wms_link"
+        ),
+        # std_nodes에 존재하는 노드에만 링크되도록 (복합 FK)
+        ForeignKeyConstraint(
+            ["std_release_id", "std_node_uid"],
+            ["std_nodes.std_release_id", "std_nodes.std_node_uid"],
+            ondelete="CASCADE",
+            name="fk_link_stdnode",
+        ),
+        Index("ix_link_node", "std_release_id", "std_node_uid"),
+        Index("ix_link_row", "wms_row_id"),
     )

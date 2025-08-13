@@ -11,6 +11,7 @@ import CalcPage from "./pages/calc.jsx";
 import WmsPage from "./pages/wms.jsx";
 import ReportingPage from "./pages/reporting.jsx";
 import LoginPage from "./pages/login.jsx";
+import StdGwmPage from "./pages/std_gwm";
 
 const router = createBrowserRouter([
   {
@@ -18,6 +19,7 @@ const router = createBrowserRouter([
     element: <App />,
     children: [
       { path: "/standards", element: <StandardsPage /> },
+      { path: "/standards/gwm", element: <StdGwmPage /> },
       { path: "/projects/:id", element: <ProjectPage /> },
       { path: "/calc", element: <CalcPage /> },
       { path: "/wms", element: <WmsPage /> },

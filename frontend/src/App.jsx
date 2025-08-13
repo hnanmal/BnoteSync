@@ -23,6 +23,7 @@ export default function App() {
       <aside className="border-r bg-white p-2">
         <nav className="space-y-1">
           <NavLink to="/standards">Standards</NavLink>
+          <NavLink to="/standards/gwm">Std-GWM</NavLink>
           <NavLink to="/projects/1">Projects</NavLink>
           <NavLink to="/calc">Calc</NavLink>
           <NavLink to="/wms">WMS</NavLink>
