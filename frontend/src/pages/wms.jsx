@@ -1,13 +1,63 @@
 import { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { listBatches, previewBatch, ingestWms, validateBatch } from "../shared/api/wms";
+// import { listBatches, previewBatch, ingestWms, validateBatch } from "../shared/api/wms";
+import { uploadExcel, listBatches, previewBatch, ingestWms, validateBatch, deleteBatch } from "../shared/api/wms";
+import { useRef } from "react";
+
+function UploadBox({ onUploaded }) {
+  const inputRef = useRef(null);
+  const [src, setSrc] = useState("AR");
+  const [dryRun, setDryRun] = useState(true);
+  const [result, setResult] = useState(null);
+
+  const onPick = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const data = await uploadExcel({ file, source: src, dry_run: dryRun });
+    setResult(data);
+    if (!dryRun && data.batch_id) onUploaded?.(data.batch_id);
+  };
+
+  return (
+    <div className="flex items-center gap-2">
+      <select className="border rounded px-2 py-1" value={src} onChange={e=>setSrc(e.target.value)}>
+        <option>AR</option><option>FP</option><option>SS</option>
+      </select>
+      <label className="inline-flex items-center gap-1 text-sm">
+        <input type="checkbox" checked={dryRun} onChange={e=>setDryRun(e.target.checked)} />
+        Dry-run
+      </label>
+      <button className="px-3 py-2 rounded border" onClick={()=>inputRef.current?.click()}>
+        Upload Excel
+      </button>
+      <input ref={inputRef} type="file" accept=".xlsx,.xls" className="hidden" onChange={onPick} />
+      {result ? (
+        <span className="text-xs text-gray-500">
+          {result.dry_run ? `detected: ${result.detected_items}` : `batch #${result.batch_id}, count: ${result.count}`}
+        </span>
+      ) : null}
+    </div>
+  );
+}
 
 function SimpleTable({ rows }) {
-  const columns = useMemo(() => {
-    const keys = new Set(["row_index", "status"]);
-    rows.forEach(r => Object.keys(r.payload_json || {}).forEach(k => keys.add(k)));
-    return Array.from(keys);
-  }, [rows]);
+  // rows[*].payload_json 에는 top-level(code,name,qty,unit,group_code) + _raw(원본전체)
+  const flatRows = rows.map(r => {
+    const p = r.payload_json || {};
+    const flattened = { ...p, ...(p._raw || {}) }; // ✅ 원본 열 펼침
+    // 원본이 표시되면 _raw 키 자체는 제거
+    delete flattened._raw;
+    return { row_index: r.row_index, status: r.status, ...flattened };
+  });
+
+  const columns = Array.from(
+    new Set(
+      flatRows.reduce((acc, r) => {
+        Object.keys(r).forEach(k => acc.push(k));
+        return acc;
+      }, [])
+    )
+  );
 
   return (
     <div className="overflow-auto border rounded">
@@ -18,13 +68,13 @@ function SimpleTable({ rows }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map(r => (
-            <tr key={r.id} className="odd:bg-white even:bg-gray-50">
-              {columns.map(c => {
-                if (c === "row_index") return <td key={c} className="p-2 border-b">{r.row_index}</td>;
-                if (c === "status") return <td key={c} className="p-2 border-b">{r.status}</td>;
-                return <td key={c} className="p-2 border-b">{(r.payload_json ?? {})[c] ?? ""}</td>;
-              })}
+          {flatRows.map((r, idx) => (
+            <tr key={idx} className="odd:bg-white even:bg-gray-50">
+              {columns.map(c => (
+                <td key={c} className="p-2 border-b">
+                  {r[c] == null ? "" : String(r[c])}
+                </td>
+              ))}
             </tr>
           ))}
         </tbody>
@@ -33,16 +83,23 @@ function SimpleTable({ rows }) {
   );
 }
 
+
 export default function WmsPage() {
   const qc = useQueryClient();
   const [selected, setSelected] = useState(null);
 
   const batchesQ = useQuery({ queryKey: ["wms","batches"], queryFn: listBatches, refetchOnWindowFocus: false });
 
+  const [pageSize, setPageSize] = useState(50); // 50 | 100 | 500 | 'ALL'
+  const isAll = pageSize === 'ALL';
+
   const previewQ = useQuery({
     enabled: !!selected,
-    queryKey: ["wms","preview", selected],
-    queryFn: () => previewBatch(selected, { limit: 50, offset: 0 }),
+    queryKey: ["wms","preview", selected, pageSize],
+    queryFn: () => previewBatch(
+      selected,
+      { limit: isAll ? undefined : pageSize, offset: 0 } // ✅ All이면 limit 미전달
+    ),
   });
 
   const ingestM = useMutation({
@@ -55,9 +112,18 @@ export default function WmsPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["wms","batches"] }),
   });
 
+  const deleteM = useMutation({
+    mutationFn: deleteBatch,
+    onSuccess: () => {
+      setSelected(null);
+      qc.invalidateQueries({ queryKey: ["wms","batches"] });
+    },
+  });
+
   return (
     <div className="space-y-4">
       {/* 상단: Ingest / Validate */}
+      <UploadBox onUploaded={()=>qc.invalidateQueries({ queryKey: ["wms","batches"] })} />
       <div className="p-4 bg-white rounded shadow flex items-center gap-2">
         <button
           className="px-3 py-2 rounded border"
@@ -88,7 +154,21 @@ export default function WmsPage() {
               </option>
             ))}
           </select>
-
+          {/* ✅ 행수 선택 */}
+          <label className="text-sm text-gray-600">Rows:</label>
+          <select
+            className="border rounded px-2 py-1"
+            value={String(pageSize)}
+            onChange={(e) => {
+              const v = e.target.value;
+              setPageSize(v === 'ALL' ? 'ALL' : Number(v));
+            }}
+          >
+            <option value="50">50</option>
+            <option value="100">100</option>
+            <option value="500">500</option>
+            <option value="ALL">All</option>
+          </select>
           <button
             className="px-3 py-2 rounded border"
             disabled={!selected}
@@ -96,6 +176,19 @@ export default function WmsPage() {
             title="필수 필드(code,name,qty) 간단 검증"
           >
             Validate
+          </button>
+          <button
+            className="px-3 py-2 rounded border text-red-600 border-red-300 disabled:opacity-50"
+            disabled={!selected || deleteM.isPending}
+            onClick={() => {
+              if (!selected) return;
+              if (window.confirm(`Delete batch #${selected}? This cannot be undone.`)) {
+                deleteM.mutate(selected);
+              }
+            }}
+            title="선택한 배치와 하위 행 전체 삭제"
+          >
+            Delete batch
           </button>
         </div>
       </div>
