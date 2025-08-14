@@ -45,13 +45,18 @@ export default function StdGwmPage() {
   const [sources, setSources] = useState(["AR","FP","SS"]);
   const [search, setSearch] = useState("");
   const [selRowIds, setSelRowIds] = useState(new Set());
-  const [pageSize, setPageSize] = useState(500); // 필요시 All 처리 가능
+  const [pageSize, setPageSize] = useState(500); // 필요시 All 처리 가능 number | 'ALL'
 
   // Releases
   const relQ = useQuery({
     queryKey: ["std","releases"],
     queryFn: listStdReleases,
-    onSuccess: (data) => { if (!rid && data?.length) setRid(data[0].id); }
+    onSuccess: (data) => {
+      if (!Number.isFinite(rid) && data?.length) {
+        const first = Number(data[0].id);
+        setRid(Number.isFinite(first) ? first : null);
+      }
+    }
   });
 
   // Tree
@@ -64,9 +69,26 @@ export default function StdGwmPage() {
   // WMS items (우측)
   const itemsQ = useQuery({
     queryKey: ["wms","items", sources, search, pageSize],
-    queryFn: () => listWmsItems({ sources, search, limit: pageSize }),
+    queryFn: () =>
+      listWmsItems({
+        sources,
+        search,
+        // 'ALL'이면 limit 파라미터 자체를 생략(서버가 전체 반환)
+        limit: pageSize === 'ALL' ? undefined : pageSize
+      }),
     refetchOnWindowFocus: false
   });
+
+  const dynCols = useMemo(() => {
+    const freq = new Map();
+    for (const r of itemsQ.data ?? []) {
+      const raw = r?._raw || {};
+      Object.keys(raw).forEach(k => freq.set(k, (freq.get(k) || 0) + 1));
+    }
+    return Array.from(freq.entries())
+      .sort((a,b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
+      .map(([k]) => k);
+  }, [itemsQ.data]);
 
   // Links (중앙 - 선택 노드)
   const linksQ = useQuery({
@@ -75,15 +97,51 @@ export default function StdGwmPage() {
     queryFn: () => listLinks({ rid, uid: selectedNode.std_node_uid })
   });
 
+  // 1) 트리에서 모든 UID 수집
+  function collectUids(rootChildren) {
+    const set = new Set();
+    const walk = (n) => {
+      set.add(n.std_node_uid);
+      (n.children ?? []).forEach(walk);
+    };
+    (rootChildren ?? []).forEach(walk);
+    return set;
+  }
+
+  // 2) 중복 회피 함수
+  function uniqueUid(base, taken) {
+    let cand = base.slice(0, 64);
+    if (!cand) cand = `NODE_${Date.now()}`;
+    if (!taken.has(cand)) return cand;
+    let i = 2;
+    while (taken.has(`${cand}_${i}`)) i += 1;
+    return `${cand}_${i}`.slice(0, 64);
+  }
+
+  // 간단 UID 변환기
+  function toUID(name) {
+    return name
+      .trim()
+      .replace(/\s+/g, "_")
+      .replace(/[^A-Za-z0-9_]/g, "")
+      .toUpperCase()
+      .slice(0, 64);
+  }
+
   // CRUD mutations
   const addM = useMutation({
-    mutationFn: ({ parent, name }) => {
-      const uid = prompt("New UID (stable key)?", `GWM_${Date.now()}`);
-      if (!uid) return Promise.resolve();
-      return createStdNode(rid, { parent_uid: parent?.std_node_uid ?? null, std_node_uid: uid, name, order_index: 0 });
+    mutationFn: ({ parent, name, uid }) => {
+      const finalUid = uid ?? (toUID(name) || `NODE_${Date.now()}`); // ✅ fallback
+      return createStdNode(rid, {
+        parent_uid: parent?.std_node_uid ?? null,
+        std_node_uid: finalUid,
+        name,
+        order_index: 0,
+      });
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["std","tree",rid] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["std","tree", rid] }),
   });
+
   const renameM = useMutation({
     mutationFn: ({ node, name }) => updateStdNode(rid, node.std_node_uid, { name }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["std","tree",rid] }),
@@ -126,11 +184,19 @@ export default function StdGwmPage() {
       {/* 헤더: Release 선택 */}
       <div className="mb-3 flex items-center gap-2">
         <h2 className="text-xl font-semibold">Standard GWM</h2>
-        <select className="border rounded px-2 py-1"
-          value={rid ?? ""}
-          onChange={(e)=> setRid(Number(e.target.value))}
+        <select
+          className="border rounded px-2 py-1"
+          value={Number.isFinite(rid) ? String(rid) : ""}
+          onChange={(e)=> {
+            const v = e.target.value;
+            const next = v === "" ? null : Number(v);
+            setRid(Number.isFinite(next) ? next : null);
+          }}
         >
-          {relQ.data?.map(r => <option key={r.id} value={r.id}>{r.version}</option>)}
+          <option value="">(릴리즈 선택)</option>
+          {relQ.data?.map(r => (
+            <option key={r.id} value={String(r.id)}>{r.version}</option>
+          ))}
         </select>
       </div>
 
@@ -146,7 +212,8 @@ export default function StdGwmPage() {
                 if (!rid) { alert("먼저 Release를 선택하세요."); return; }  // ✅ 가드
                 const name = prompt("Root node name?", "GWM");
                 if (!name) return;
-                addM.mutate({ parent: null, name });
+                const uid = toUID(name) || `GWM_${Date.now()}`;   // 최후 fallback
+                addM.mutate({ parent: null, name, uid });         // ✅ 두 번째 UID 프롬프트 제거
             }}
             >＋ Root</button>
           </div>
@@ -156,9 +223,14 @@ export default function StdGwmPage() {
               selectedUid={selectedNode?.std_node_uid}
               onSelect={setSelectedNode}
               onAddChild={(parent)=>{
-              if (!rid) { alert("먼저 Release를 선택하세요."); return; }
-              const name = prompt("Child node name?");
-              if (name) addM.mutate({ parent, name });
+                if (!Number.isFinite(rid)) return alert("먼저 Release를 선택하세요.");
+                const name = prompt("Child node name?");
+                if (!name) return;
+                const base = toUID(name) || `NODE_${Date.now()}`;
+                const taken = collectUids(treeQ.data?.children ?? []);
+                // 부모와 동일한 UID가 되면 여기서 _2 붙여 회피
+                const uid = uniqueUid(base, taken);
+                addM.mutate({ parent, name, uid }); // ✅ 이제 항상 유일
               }}
               onRename={(node)=>{
               if (!rid) { alert("먼저 Release를 선택하세요."); return; }
@@ -245,15 +317,26 @@ export default function StdGwmPage() {
               onChange={(e)=>setSearch(e.target.value)}
             />
             <label className="text-sm">Rows:</label>
-            <select className="border rounded px-2 py-1" value={String(pageSize)} onChange={e=>setPageSize(Number(e.target.value))}>
+            <select
+              className="border rounded px-2 py-1"
+              value={String(pageSize)}
+              onChange={(e)=>{
+                const v = e.target.value;
+                setPageSize(v === 'ALL' ? 'ALL' : Number(v));
+              }}
+            >
+              <option value="ALL">All</option>
               <option value="200">200</option>
               <option value="500">500</option>
               <option value="1000">1000</option>
             </select>
           </div>
 
+          {/* <div className="overflow-auto border rounded">
+            <table className="min-w-full text-sm"> */}
           <div className="overflow-auto border rounded">
-            <table className="min-w-full text-sm">
+            {/* 많은 컬럼을 위해 min-w-max 로 가로 스크롤 허용 */}
+            <table className="min-w-max text-sm table-auto">
               <thead className="bg-gray-50">
                 <tr>
                   <th className="p-2"><input type="checkbox" checked={allSelectedOnPage} onChange={togglePageAll} /></th>
@@ -263,6 +346,10 @@ export default function StdGwmPage() {
                   <th className="p-2 text-left">name</th>
                   <th className="p-2 text-left">unit</th>
                   <th className="p-2 text-left">qty</th>
+                  {/* ✅ 동적 원본 컬럼들 */}
+                  {dynCols.map(c => (
+                    <th key={c} className="p-2 text-left">{c}</th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
@@ -275,6 +362,12 @@ export default function StdGwmPage() {
                     <td className="p-2">{r.name}</td>
                     <td className="p-2">{r.unit ?? ""}</td>
                     <td className="p-2">{r.qty ?? ""}</td>
+                    {/* ✅ 각 행의 해당 값 렌더 */}
+                    {dynCols.map(c => (
+                      <td key={c} className="p-2">
+                        {String(r._raw?.[c] ?? "")}
+                      </td>
+                    ))}
                   </tr>
                 )) ?? null}
               </tbody>

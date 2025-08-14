@@ -1,0 +1,153 @@
+
+📄 backend\alembic\env.py
+  - def run_migrations_offline()
+  - def run_migrations_online()
+
+📄 backend\alembic\versions\156620640f7c_std_tables.py
+  - def upgrade()
+      Upgrade schema.
+  - def downgrade()
+      Downgrade schema.
+
+📄 backend\alembic\versions\2b473cff468d_create_std_tables_fix.py
+  - def upgrade()
+  - def downgrade()
+
+📄 backend\alembic\versions\83d1a183296a_init.py
+  - def upgrade()
+      Upgrade schema.
+  - def downgrade()
+      Downgrade schema.
+
+📄 backend\alembic\versions\8565be0116c4_std_wms_link.py
+  - def upgrade()
+      Upgrade schema.
+  - def downgrade()
+      Downgrade schema.
+
+📄 backend\alembic\versions\a7f406eadfd1_std_tables.py
+  - def upgrade()
+  - def downgrade()
+
+📄 backend\alembic\versions\f0c2f6bcbd61_wms_tables.py
+  - def _has_table()
+  - def upgrade()
+  - def downgrade()
+
+📄 backend\app\deps.py
+  - def get_db()
+
+📄 backend\app\main.py
+  - def healthz()
+
+📄 backend\app\shared\config.py
+  - def cors_origins_list()
+
+📄 backend\app\standards\router.py
+  - def list_releases()
+  - def create_release()
+  - def seed_demo()
+  - def get_tree()
+  - def sort_children()
+
+📄 backend\app\wms\router.py
+  - def ingest()
+  - def list_batches()
+  - def preview_batch()
+  - def validate_batch()
+  - def list_errors()
+  - def _normalize_work_master_excel()
+      반환: (items, raw_columns)
+      - items: 각 행 dict: { code, name, qty, unit, group_code, _raw: {<원본헤더(디듀프)>: 값, ...} }
+      - raw_columns: 디듀프된 원본 컬럼명 리스트(표시 순서)
+  - def upload_excel()
+      엑셀 파일(Work Master 형식)을 업로드하고 items로 정규화한 뒤,
+      dry_run=False면 즉시 WMS에 인제스트합니다.
+  - def delete_batch()
+      배치 1건과 그 하위 rows 전체 삭제.
+      SQLite에서는 PRAGMA foreign_keys=ON + FK(ondelete='CASCADE')가 필요합니다.
+  - def list_items()
+  - def list_links()
+  - def assign_links()
+      body: { "std_release_id": 1, "std_node_uid": "EARTH/...", "row_ids": [1,2,3] }
+  - def unassign_links()
+      body: { "std_release_id": 1, "std_node_uid": "EARTH/...", "row_ids": [1,2,3] }
+  - def find_idx()
+  - def series_by_idx()
+  - def clean_scalar()
+
+📄 frontend\src\App.jsx
+  - function NavLink (Line 3)()
+  - function App (Line 13)()
+
+📄 frontend\src\pages\calc.jsx
+  - function CalcPage (Line 1)()
+
+📄 frontend\src\pages\login.jsx
+  - function LoginPage (Line 1)()
+
+📄 frontend\src\pages\projects.jsx
+  - function ProjectPage (Line 2)()
+
+📄 frontend\src\pages\reporting.jsx
+  - function ReportingPage (Line 1)()
+
+📄 frontend\src\pages\standards.jsx
+  - function TreeNode (Line 5)()
+  - function StandardsPage (Line 32)()
+  - function queryFn (Line 43)()
+
+📄 frontend\src\pages\std_gwm.jsx
+  - function TreeNode (Line 10)()
+  - function StdGwmPage (Line 41)()
+  - function onSuccess (Line 54)()
+  - function queryFn (Line 61)()
+  - function queryFn (Line 67)()
+  - function queryFn (Line 75)()
+  - function mutationFn (Line 80)()
+  - function onSuccess (Line 85)()
+  - function mutationFn (Line 88)()
+  - function onSuccess (Line 89)()
+  - function mutationFn (Line 92)()
+  - function onSuccess (Line 93)()
+  - function mutationFn (Line 97)()
+  - function onSuccess (Line 98)()
+  - function mutationFn (Line 101)()
+  - function onSuccess (Line 102)()
+  - function toggleRow (Line 106)()
+  - function togglePageAll (Line 114)()
+
+📄 frontend\src\pages\wms.jsx
+  - function UploadBox (Line 7)()
+  - function onPick (Line 13)()
+  - function SimpleTable (Line 43)()
+  - function WmsPage (Line 87)()
+  - function queryFn (Line 99)()
+  - function onSuccess (Line 107)()
+  - function mutationFn (Line 111)()
+  - function onSuccess (Line 112)()
+  - function onSuccess (Line 117)()
+
+📄 frontend\src\shared\api\std.js
+  - function listStdReleases (Line 3)()
+  - function getStdTree (Line 8)()
+  - function createStdNode (Line 15)()
+  - function updateStdNode (Line 16)()
+  - function deleteStdNode (Line 17)()
+  - function listWmsItems (Line 20)()
+  - function listLinks (Line 29)()
+  - function assignLinks (Line 32)()
+  - function unassignLinks (Line 35)()
+
+📄 frontend\src\shared\api\wms.js
+  - function ingestWms (Line 3)()
+  - function listBatches (Line 8)()
+  - function previewBatch (Line 13)()
+  - function validateBatch (Line 22)()
+  - function listErrors (Line 27)()
+  - function uploadExcel (Line 33)()
+  - function deleteBatch (Line 45)()
+  - function listWmsItems (Line 51)()
+  - function listLinks (Line 60)()
+  - function assignLinks (Line 63)()
+  - function unassignLinks (Line 66)()

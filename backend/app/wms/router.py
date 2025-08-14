@@ -359,18 +359,12 @@ def delete_batch(batch_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
-# from typing import Optional, Iterable
-# from sqlalchemy import select, or_, and_
-# from sqlalchemy.exc import IntegrityError
-# ... 기존 import 유지
-
-
 # 통합 아이템 목록 (AR/FP/SS 통합, 필터/검색/페이지네이션)
 @router.get("/items")
 def list_items(
     sources: Optional[str] = Query(None, description="쉼표구분: AR,FP,SS"),
-    search: Optional[str] = Query(None, description="code/name 부분검색"),
-    limit: int | None = Query(200),
+    search: Optional[str] = Query(None, description="code/name/원본(raw) 부분검색"),
+    limit: int | None = Query(None),  # ✅ ALL 지원: 기본 None
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
@@ -385,18 +379,35 @@ def list_items(
     )
     if src_list:
         q = q.where(m.WmsBatch.source.in_(src_list))
-    rows = db.execute(q).all()
 
+    rows = db.execute(q).all()
+    s_lower = (search or "").lower()
     items = []
+
     for r in rows:
         p = r.payload_json or {}
+        raw = p.get("_raw") if isinstance(p, dict) else {}
         code = (p.get("code") or "") if isinstance(p, dict) else ""
         name = (p.get("name") or "") if isinstance(p, dict) else ""
-        # 검색
-        if search:
-            s = search.lower()
-            if s not in str(code).lower() and s not in str(name).lower():
+
+        # ✅ 검색: code/name + raw 전체 값에서 부분일치
+        if s_lower:
+            hit = False
+            for v in (code, name):
+                if s_lower in str(v).lower():
+                    hit = True
+                    break
+            if not hit and isinstance(raw, dict):
+                for v in raw.values():
+                    try:
+                        if s_lower in str(v).lower():
+                            hit = True
+                            break
+                    except Exception:
+                        pass
+            if not hit:
                 continue
+
         items.append(
             {
                 "row_id": int(r.id),
@@ -405,12 +416,68 @@ def list_items(
                 "name": name,
                 "unit": (p.get("unit") if isinstance(p, dict) else None),
                 "qty": (p.get("qty") if isinstance(p, dict) else None),
-                "_raw": p.get("_raw") if isinstance(p, dict) else None,
+                "_raw": raw,  # ✅ 프론트가 여기서 모든 컬럼을 꺼내 쓸 것
             }
         )
+
     if limit is not None:
         items = items[offset : offset + limit]
     return items
+
+
+# @router.get("/items")
+# def list_items(
+#     # ✅ 배열도 받고, CSV도 받고 (반복키 → list[str], CSV는 요소 1개 문자열로 들어옴)
+#     sources: Optional[list[str]] = Query(
+#         None, description="반복키 또는 CSV: sources=AR&sources=FP / 'AR,FP,SS'"
+#     ),
+#     search: Optional[str] = Query(None, description="code/name 부분검색"),
+#     limit: int | None = Query(None),  # ✅ 기본값 None → ALL 허용
+#     offset: int = Query(0, ge=0),
+#     db: Session = Depends(get_db),
+# ):
+#     # ✅ 반복키/CSV 모두 처리
+#     src_list: Optional[list[str]] = None
+#     if sources:
+#         src_list = []
+#         for s in sources:
+#             src_list += [x.strip() for x in s.split(",") if x.strip()]
+
+#     q = (
+#         select(m.WmsRow.id, m.WmsBatch.source, m.WmsRow.payload_json)
+#         .join(m.WmsBatch, m.WmsBatch.id == m.WmsRow.batch_id)
+#         .order_by(m.WmsRow.id.desc())
+#     )
+#     if src_list:
+#         q = q.where(m.WmsBatch.source.in_(src_list))
+
+#     rows = db.execute(q).all()
+
+#     items = []
+#     s_lower = (search or "").lower()
+#     for r in rows:
+#         p = r.payload_json or {}
+#         code = (p.get("code") or "") if isinstance(p, dict) else ""
+#         name = (p.get("name") or "") if isinstance(p, dict) else ""
+#         if s_lower:
+#             if s_lower not in str(code).lower() and s_lower not in str(name).lower():
+#                 continue
+#         items.append(
+#             {
+#                 "row_id": int(r.id),
+#                 "source": r.source,
+#                 "code": code,
+#                 "name": name,
+#                 "unit": (p.get("unit") if isinstance(p, dict) else None),
+#                 "qty": (p.get("qty") if isinstance(p, dict) else None),
+#                 "_raw": p.get("_raw") if isinstance(p, dict) else None,
+#             }
+#         )
+
+#     # ✅ ALL이면 자르지 않음
+#     if limit is not None:
+#         items = items[offset : offset + limit]
+#     return items
 
 
 # 특정 노드의 링크 목록 (현재 할당됨)
