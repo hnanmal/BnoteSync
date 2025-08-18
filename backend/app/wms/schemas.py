@@ -32,3 +32,14 @@ class WmsRowOut(BaseModel):
 
 class WmsValidateRequest(BaseModel):
     required_fields: List[str] = Field(default_factory=list)
+
+
+class WmsLinkedItemOut(BaseModel):
+    row_id: int
+    source: str
+    code: Optional[str] = None
+    name: Optional[str] = None
+    unit: Optional[str] = None
+    qty: Optional[Any] = None
+    # JSON 키는 "_raw"로 내보내되, 내부 필드명은 raw로 관리
+    raw: Optional[dict[str, Any]] = Field(default=None, alias="_raw")

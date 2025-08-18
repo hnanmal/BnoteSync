@@ -34,7 +34,7 @@ export default function App() {
 
       {/* Main */}
       <main className="p-4">
-        <div className="max-w-5xl mx-auto">
+        <div className="max-w-none mx-auto">
           <Outlet />
         </div>
       </main>

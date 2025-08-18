@@ -366,8 +366,12 @@ def list_items(
     search: Optional[str] = Query(None, description="code/name/원본(raw) 부분검색"),
     limit: int | None = Query(None),  # ✅ ALL 지원: 기본 None
     offset: int = Query(0, ge=0),
+    order: str = Query("asc", description="asc|desc"),  # ✅ 기본 asc
     db: Session = Depends(get_db),
 ):
+    if order not in ("asc", "desc"):
+        raise HTTPException(400, "order must be 'asc' or 'desc'")
+
     src_list: Optional[list[str]] = None
     if sources:
         src_list = [s.strip() for s in sources.split(",") if s.strip()]
@@ -375,7 +379,7 @@ def list_items(
     q = (
         select(m.WmsRow.id, m.WmsBatch.source, m.WmsRow.payload_json)
         .join(m.WmsBatch, m.WmsBatch.id == m.WmsRow.batch_id)
-        .order_by(m.WmsRow.id.desc())
+        .order_by(m.WmsRow.id.asc() if order == "asc" else m.WmsRow.id.desc())
     )
     if src_list:
         q = q.where(m.WmsBatch.source.in_(src_list))
@@ -392,11 +396,7 @@ def list_items(
 
         # ✅ 검색: code/name + raw 전체 값에서 부분일치
         if s_lower:
-            hit = False
-            for v in (code, name):
-                if s_lower in str(v).lower():
-                    hit = True
-                    break
+            hit = any(s_lower in str(v).lower() for v in (code, name))
             if not hit and isinstance(raw, dict):
                 for v in raw.values():
                     try:
@@ -420,97 +420,92 @@ def list_items(
             }
         )
 
+    # ✅ 검색 후 최종 정렬
+    items.sort(key=lambda x: x["row_id"], reverse=(order == "desc"))
+
+    # ✅ 정렬 이후 슬라이스
     if limit is not None:
         items = items[offset : offset + limit]
+
     return items
 
 
-# @router.get("/items")
-# def list_items(
-#     # ✅ 배열도 받고, CSV도 받고 (반복키 → list[str], CSV는 요소 1개 문자열로 들어옴)
-#     sources: Optional[list[str]] = Query(
-#         None, description="반복키 또는 CSV: sources=AR&sources=FP / 'AR,FP,SS'"
-#     ),
-#     search: Optional[str] = Query(None, description="code/name 부분검색"),
-#     limit: int | None = Query(None),  # ✅ 기본값 None → ALL 허용
-#     offset: int = Query(0, ge=0),
-#     db: Session = Depends(get_db),
-# ):
-#     # ✅ 반복키/CSV 모두 처리
-#     src_list: Optional[list[str]] = None
-#     if sources:
-#         src_list = []
-#         for s in sources:
-#             src_list += [x.strip() for x in s.split(",") if x.strip()]
-
-#     q = (
-#         select(m.WmsRow.id, m.WmsBatch.source, m.WmsRow.payload_json)
-#         .join(m.WmsBatch, m.WmsBatch.id == m.WmsRow.batch_id)
-#         .order_by(m.WmsRow.id.desc())
-#     )
-#     if src_list:
-#         q = q.where(m.WmsBatch.source.in_(src_list))
-
-#     rows = db.execute(q).all()
-
-#     items = []
-#     s_lower = (search or "").lower()
-#     for r in rows:
-#         p = r.payload_json or {}
-#         code = (p.get("code") or "") if isinstance(p, dict) else ""
-#         name = (p.get("name") or "") if isinstance(p, dict) else ""
-#         if s_lower:
-#             if s_lower not in str(code).lower() and s_lower not in str(name).lower():
-#                 continue
-#         items.append(
-#             {
-#                 "row_id": int(r.id),
-#                 "source": r.source,
-#                 "code": code,
-#                 "name": name,
-#                 "unit": (p.get("unit") if isinstance(p, dict) else None),
-#                 "qty": (p.get("qty") if isinstance(p, dict) else None),
-#                 "_raw": p.get("_raw") if isinstance(p, dict) else None,
-#             }
-#         )
-
-#     # ✅ ALL이면 자르지 않음
-#     if limit is not None:
-#         items = items[offset : offset + limit]
-#     return items
-
-
 # 특정 노드의 링크 목록 (현재 할당됨)
-@router.get("/links")
+
+
+@router.get("/links", response_model=list[s.WmsLinkedItemOut])
 def list_links(
-    std_release_id: int = Query(...),
-    std_node_uid: str = Query(...),
+    rid: int = Query(..., description="std_release_id"),
+    uid: str = Query(..., description="std_node_uid"),
+    order: str = Query("asc", description="asc|desc"),
     db: Session = Depends(get_db),
 ):
+    if order not in ("asc", "desc"):
+        raise HTTPException(400, "order must be 'asc' or 'desc'")
+
+    # std_wms_link: (std_release_id, std_node_uid, row_id)
     q = (
-        select(m.StdWmsLink.wms_row_id, m.WmsBatch.source, m.WmsRow.payload_json)
-        .join(m.WmsRow, m.WmsRow.id == m.StdWmsLink.wms_row_id)
+        select(m.WmsRow.id, m.WmsBatch.source, m.WmsRow.payload_json)
         .join(m.WmsBatch, m.WmsBatch.id == m.WmsRow.batch_id)
+        .join(m.StdWmsLink, m.StdWmsLink.wms_row_id == m.WmsRow.id)
         .where(
-            m.StdWmsLink.std_release_id == std_release_id, m.StdWmsLink.std_node_uid == std_node_uid
+            m.StdWmsLink.std_release_id == rid,
+            m.StdWmsLink.std_node_uid == uid,
         )
-        .order_by(m.WmsRow.row_index.asc())
+        .order_by(m.WmsRow.id.asc() if order == "asc" else m.WmsRow.id.desc())
     )
     rows = db.execute(q).all()
-    out = []
+
+    items = []
     for r in rows:
         p = r.payload_json or {}
-        out.append(
+        raw = p.get("_raw") if isinstance(p, dict) else {}
+        code = (p.get("code") or "") if isinstance(p, dict) else ""
+        name = (p.get("name") or "") if isinstance(p, dict) else ""
+        items.append(
             {
-                "row_id": int(r.wms_row_id),
+                "row_id": int(r.id),
                 "source": r.source,
-                "code": (p.get("code") if isinstance(p, dict) else None),
-                "name": (p.get("name") if isinstance(p, dict) else None),
+                "code": code,
+                "name": name,
                 "unit": (p.get("unit") if isinstance(p, dict) else None),
                 "qty": (p.get("qty") if isinstance(p, dict) else None),
+                "_raw": raw,  # ✅ 원본 모든 컬럼
             }
         )
-    return out
+    return items
+
+
+# @router.get("/links")
+# def list_links(
+#     std_release_id: int = Query(...),
+#     std_node_uid: str = Query(...),
+#     db: Session = Depends(get_db),
+# ):
+#     q = (
+#         select(m.StdWmsLink.wms_row_id, m.WmsBatch.source, m.WmsRow.payload_json)
+#         .join(m.WmsRow, m.WmsRow.id == m.StdWmsLink.wms_row_id)
+#         .join(m.WmsBatch, m.WmsBatch.id == m.WmsRow.batch_id)
+#         .where(
+#             m.StdWmsLink.std_release_id == std_release_id, m.StdWmsLink.std_node_uid == std_node_uid
+#         )
+#         .order_by(m.WmsRow.row_index.asc())
+#     )
+#     rows = db.execute(q).all()
+#     out = []
+#     for r in rows:
+#         p = r.payload_json or {}
+#         out.append(
+#             {
+#                 "row_id": int(r.wms_row_id),
+#                 "source": r.source,
+#                 "code": (p.get("code") if isinstance(p, dict) else None),
+#                 "name": (p.get("name") if isinstance(p, dict) else None),
+#                 "unit": (p.get("unit") if isinstance(p, dict) else None),
+#                 "qty": (p.get("qty") if isinstance(p, dict) else None),
+#             }
+#         )
+#     return out
 
 
 # 다중 할당

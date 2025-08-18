@@ -46,6 +46,7 @@ export default function StdGwmPage() {
   const [search, setSearch] = useState("");
   const [selRowIds, setSelRowIds] = useState(new Set());
   const [pageSize, setPageSize] = useState(500); // 필요시 All 처리 가능 number | 'ALL'
+  const [order, setOrder] = useState("asc"); // 기본 오름차순
 
   // Releases
   const relQ = useQuery({
@@ -68,13 +69,14 @@ export default function StdGwmPage() {
 
   // WMS items (우측)
   const itemsQ = useQuery({
-    queryKey: ["wms","items", sources, search, pageSize],
+    queryKey: ["wms","items", sources, search, pageSize, order],
     queryFn: () =>
       listWmsItems({
         sources,
         search,
         // 'ALL'이면 limit 파라미터 자체를 생략(서버가 전체 반환)
-        limit: pageSize === 'ALL' ? undefined : pageSize
+        limit: pageSize === 'ALL' ? undefined : pageSize,
+        order,
       }),
     refetchOnWindowFocus: false
   });
@@ -90,12 +92,26 @@ export default function StdGwmPage() {
       .map(([k]) => k);
   }, [itemsQ.data]);
 
+  
   // Links (중앙 - 선택 노드)
   const linksQ = useQuery({
     enabled: !!(rid && selectedNode),
     queryKey: ["wms","links", rid, selectedNode?.std_node_uid],
     queryFn: () => listLinks({ rid, uid: selectedNode.std_node_uid })
   });
+  
+  // ✅ Assignments용 동적 컬럼
+  const dynColsLinked = dynCols;
+  // const dynColsLinked = useMemo(() => {
+  //   const freq = new Map();
+  //   for (const r of linksQ.data ?? []) {
+  //     const raw = r?._raw || {};
+  //     Object.keys(raw).forEach(k => freq.set(k, (freq.get(k) || 0) + 1));
+  //   }
+  //   return Array.from(freq.entries())
+  //     .sort((a,b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
+  //     .map(([k]) => k);
+  // }, [linksQ.data]);
 
   // 1) 트리에서 모든 UID 수집
   function collectUids(rootChildren) {
@@ -148,8 +164,15 @@ export default function StdGwmPage() {
   });
   const delM = useMutation({
     mutationFn: (node) => deleteStdNode(rid, node.std_node_uid),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["std","tree",rid] }); if (selectedNode?.std_node_uid===node.std_node_uid) setSelectedNode(null); },
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: ["std","tree", rid] });
+      if (selectedNode?.std_node_uid === variables.std_node_uid) setSelectedNode(null);
+    },
   });
+  // const delM = useMutation({
+  //   mutationFn: (node) => deleteStdNode(rid, node.std_node_uid),
+  //   onSuccess: () => { qc.invalidateQueries({ queryKey: ["std","tree",rid] }); if (selectedNode?.std_node_uid===node.std_node_uid) setSelectedNode(null); },
+  // });
 
   const assignM = useMutation({
     mutationFn: () => assignLinks({ rid, uid: selectedNode.std_node_uid, row_ids: Array.from(selRowIds) }),
@@ -180,7 +203,7 @@ export default function StdGwmPage() {
   };
 
   return (
-    <div className="p-4 h-full">
+    <div className="flex h-full w-full flex-col p-4">
       {/* 헤더: Release 선택 */}
       <div className="mb-3 flex items-center gap-2">
         <h2 className="text-xl font-semibold">Standard GWM</h2>
@@ -245,133 +268,142 @@ export default function StdGwmPage() {
           )}
         </div>
 
-        {/* 중앙: 선택 노드에 대한 링크 관리 */}
-        <div className="col-span-4 bg-white rounded shadow p-3 overflow-auto flex flex-col">
-          <div className="flex items-center justify-between mb-2">
-            <div>
-              <div className="font-medium">Assignments</div>
-              <div className="text-xs text-gray-500">
-                Node: {selectedNode ? selectedNode.name : "(select on left)"} / Selected rows: {selRowIds.size}
+        {/* 오른쪽: 중간 + 우측을 하나로 묶어서 수직 배치 */}
+        <div className="col-span-9 flex flex-col min-h-0">
+          {/* 위: Assignments (선택 노드 링크 관리) */}
+          <div className="bg-white rounded shadow flex flex-col min-h-0 shrink-0 basis-2/5">
+            {/* 고정 헤더 */}
+            <div className="shrink-0 px-3 py-2 border-b flex items-center justify-between">
+              <div>
+                <div className="font-medium">Assignments</div>
+                <div className="text-xs text-gray-500">
+                  Node: {selectedNode ? selectedNode.name : "(select on left)"} / Selected rows: {selRowIds.size}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  className="px-3 py-1 border rounded disabled:opacity-50"
+                  disabled={!selectedNode || selRowIds.size===0}
+                  onClick={()=>assignM.mutate()}
+                  title="아래 WMS Items 테이블에서 선택한 행을 현재 노드에 할당"
+                >Assign selected ↓</button>
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <button className="px-3 py-1 border rounded disabled:opacity-50"
-                disabled={!selectedNode || selRowIds.size===0}
-                onClick={()=>assignM.mutate()}
-                title="우측 테이블에서 선택한 행을 현재 노드에 할당"
-              >Assign selected →</button>
+
+            {/* 스크롤 영역(표만 스크롤) */}
+            {/* 스크롤 영역 (모든 컬럼) */}
+            <div className="grow min-h-0 overflow-auto">
+              <table className="min-w-max text-sm table-auto">
+                <thead className="sticky top-0 z-10 bg-gray-50 shadow-sm">
+                  <tr>
+                    <th className="p-2 text-left">row_id</th>
+                    <th className="p-2 text-left">source</th>
+                    <th className="p-2 text-left">code</th>
+                    <th className="p-2 text-left">name</th>
+                    <th className="p-2 text-left">unit</th>
+                    <th className="p-2 text-left">qty</th>
+                    {dynColsLinked.map(c => (
+                      <th key={c} className="p-2 text-left">{c}</th>
+                    ))}
+                    <th className="p-2"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {linksQ.data?.map(l => (
+                    <tr key={l.row_id} className="odd:bg-white even:bg-gray-50">
+                      <td className="p-2">{l.row_id}</td>
+                      <td className="p-2">{l.source}</td>
+                      <td className="p-2">{l.code}</td>
+                      <td className="p-2">{l.name}</td>
+                      <td className="p-2">{l.unit ?? ""}</td>
+                      <td className="p-2">{l.qty ?? ""}</td>
+                      {dynColsLinked.map(c => (
+                        <td key={c} className="p-2">{String(l._raw?.[c] ?? "")}</td>
+                      ))}
+                      <td className="p-2">
+                        <button className="text-red-600 text-xs underline"
+                          onClick={()=>unassignM.mutate([l.row_id])}
+                        >Unassign</button>
+                      </td>
+                    </tr>
+                  )) ?? null}
+                </tbody>
+              </table>
             </div>
           </div>
 
-          <div className="text-sm font-medium mb-1">Currently linked</div>
-          <div className="overflow-auto border rounded">
-            <table className="min-w-full text-sm">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="p-2 text-left">row_id</th>
-                  <th className="p-2 text-left">source</th>
-                  <th className="p-2 text-left">code</th>
-                  <th className="p-2 text-left">name</th>
-                  <th className="p-2"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {linksQ.data?.map(l=>(
-                  <tr key={l.row_id} className="odd:bg-white even:bg-gray-50">
-                    <td className="p-2">{l.row_id}</td>
-                    <td className="p-2">{l.source}</td>
-                    <td className="p-2">{l.code}</td>
-                    <td className="p-2">{l.name}</td>
-                    <td className="p-2">
-                      <button className="text-red-600 text-xs underline"
-                        onClick={()=>unassignM.mutate([l.row_id])}
-                      >Unassign</button>
-                    </td>
-                  </tr>
-                )) ?? null}
-              </tbody>
-            </table>
-          </div>
-        </div>
+          {/* 아래: WMS Items (전체 원본 컬럼 렌더) */}
+          <div className="bg-white rounded shadow flex flex-col grow min-h-0">
+            {/* 고정 헤더(툴바) */}
+            <div className="shrink-0 px-3 py-2 border-b flex items-center gap-2">
+              <span className="font-medium">WMS Items</span>
+              <label className="text-sm ml-2">Filter:</label>
+              {["AR","FP","SS"].map(s => (
+                <label key={s} className="text-sm inline-flex items-center gap-1">
+                  <input
+                    type="checkbox"
+                    checked={sources.includes(s)}
+                    onChange={(e)=>{
+                      setSources(prev => e.target.checked ? Array.from(new Set([...prev,s])) : prev.filter(x=>x!==s));
+                    }}
+                  />
+                  {s}
+                </label>
+              ))}
+              <input
+                className="border rounded px-2 py-1 text-sm ml-auto"
+                placeholder="Search any column..."
+                value={search}
+                onChange={(e)=>setSearch(e.target.value)}
+              />
+              <label className="text-sm">Rows:</label>
+              <select
+                className="border rounded px-2 py-1"
+                value={String(pageSize)}
+                onChange={e=>setPageSize(e.target.value === 'ALL' ? 'ALL' : Number(e.target.value))}
+              >
+                <option value="ALL">All</option>
+                <option value="200">200</option>
+                <option value="500">500</option>
+                <option value="1000">1000</option>
+              </select>
+            </div>
 
-        {/* 우측: WMS 아이템 테이블(AR/FP/SS 통합) */}
-        <div className="col-span-5 bg-white rounded shadow p-3 overflow-auto">
-          <div className="flex items-center gap-2 mb-2">
-            <span className="font-medium">WMS Items</span>
-            <label className="text-sm ml-2">Filter:</label>
-            {["AR","FP","SS"].map(s => (
-              <label key={s} className="text-sm inline-flex items-center gap-1">
-                <input
-                  type="checkbox"
-                  checked={sources.includes(s)}
-                  onChange={(e)=>{
-                    setSources(prev => e.target.checked ? Array.from(new Set([...prev,s])) : prev.filter(x=>x!==s));
-                  }}
-                />
-                {s}
-              </label>
-            ))}
-            <input className="border rounded px-2 py-1 text-sm ml-auto"
-              placeholder="Search code/name..."
-              value={search}
-              onChange={(e)=>setSearch(e.target.value)}
-            />
-            <label className="text-sm">Rows:</label>
-            <select
-              className="border rounded px-2 py-1"
-              value={String(pageSize)}
-              onChange={(e)=>{
-                const v = e.target.value;
-                setPageSize(v === 'ALL' ? 'ALL' : Number(v));
-              }}
-            >
-              <option value="ALL">All</option>
-              <option value="200">200</option>
-              <option value="500">500</option>
-              <option value="1000">1000</option>
-            </select>
-          </div>
-
-          {/* <div className="overflow-auto border rounded">
-            <table className="min-w-full text-sm"> */}
-          <div className="overflow-auto border rounded">
-            {/* 많은 컬럼을 위해 min-w-max 로 가로 스크롤 허용 */}
-            <table className="min-w-max text-sm table-auto">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="p-2"><input type="checkbox" checked={allSelectedOnPage} onChange={togglePageAll} /></th>
-                  <th className="p-2 text-left">row_id</th>
-                  <th className="p-2 text-left">src</th>
-                  <th className="p-2 text-left">code</th>
-                  <th className="p-2 text-left">name</th>
-                  <th className="p-2 text-left">unit</th>
-                  <th className="p-2 text-left">qty</th>
-                  {/* ✅ 동적 원본 컬럼들 */}
-                  {dynCols.map(c => (
-                    <th key={c} className="p-2 text-left">{c}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {itemsQ.data?.map(r => (
-                  <tr key={r.row_id} className="odd:bg-white even:bg-gray-50">
-                    <td className="p-2"><input type="checkbox" checked={selRowIds.has(r.row_id)} onChange={()=>toggleRow(r.row_id)} /></td>
-                    <td className="p-2">{r.row_id}</td>
-                    <td className="p-2">{r.source}</td>
-                    <td className="p-2">{r.code}</td>
-                    <td className="p-2">{r.name}</td>
-                    <td className="p-2">{r.unit ?? ""}</td>
-                    <td className="p-2">{r.qty ?? ""}</td>
-                    {/* ✅ 각 행의 해당 값 렌더 */}
+            {/* 스크롤 영역(표만 스크롤) */}
+            <div className="grow min-h-0 overflow-auto">
+              <table className="min-w-max text-sm table-auto">
+                <thead className="sticky top-0 z-10 bg-gray-50 shadow-sm">
+                  <tr>
+                    <th className="p-2"><input type="checkbox" checked={allSelectedOnPage} onChange={togglePageAll} /></th>
+                    <th className="p-2 text-left">row_id</th>
+                    <th className="p-2 text-left">src</th>
+                    <th className="p-2 text-left">code</th>
+                    <th className="p-2 text-left">name</th>
+                    <th className="p-2 text-left">unit</th>
+                    <th className="p-2 text-left">qty</th>
                     {dynCols.map(c => (
-                      <td key={c} className="p-2">
-                        {String(r._raw?.[c] ?? "")}
-                      </td>
+                      <th key={c} className="p-2 text-left">{c}</th>
                     ))}
                   </tr>
-                )) ?? null}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {itemsQ.data?.map(r => (
+                    <tr key={r.row_id} className="odd:bg-white even:bg-gray-50">
+                      <td className="p-2"><input type="checkbox" checked={selRowIds.has(r.row_id)} onChange={()=>toggleRow(r.row_id)} /></td>
+                      <td className="p-2">{r.row_id}</td>
+                      <td className="p-2">{r.source}</td>
+                      <td className="p-2">{r.code}</td>
+                      <td className="p-2">{r.name}</td>
+                      <td className="p-2">{r.unit ?? ""}</td>
+                      <td className="p-2">{r.qty ?? ""}</td>
+                      {dynCols.map(c => (
+                        <td key={c} className="p-2">{String(r._raw?.[c] ?? "")}</td>
+                      ))}
+                    </tr>
+                  )) ?? null}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>

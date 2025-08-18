@@ -48,15 +48,25 @@ export const deleteBatch = async (batchId) => {
 };
 
 // --- StdGWM용 신규 함수들 ---
-export const listWmsItems = async ({ sources, search, limit, offset = 0 } = {}) => {
+export const listWmsItems = async ({ sources, search, limit, offset = 0, order = "asc" } = {}) => {
   const params = {};
   if (sources?.length) params.sources = sources.join(",");
   if (search) params.search = search;
-  // if (limit != null) params.limit = limit;
   if (Number.isFinite(limit)) params.limit = limit;
   if (offset) params.offset = offset;
+  if (order) params.order = order;           // ✅ asc|desc
   return (await api.get("/wms/items", { params })).data;
 };
+
+// export const listWmsItems = async ({ sources, search, limit, offset = 0 } = {}) => {
+//   const params = {};
+//   if (sources?.length) params.sources = sources.join(",");
+//   if (search) params.search = search;
+//   // if (limit != null) params.limit = limit;
+//   if (Number.isFinite(limit)) params.limit = limit;
+//   if (offset) params.offset = offset;
+//   return (await api.get("/wms/items", { params })).data;
+// };
 
 // export async function listWmsItems({ sources, search, limit }) {
 //   const params = {
@@ -69,8 +79,11 @@ export const listWmsItems = async ({ sources, search, limit, offset = 0 } = {}) 
 //   return data;
 // }
 
-export const listLinks = async ({ rid, uid }) =>
-  (await api.get("/wms/links", { params: { std_release_id: rid, std_node_uid: uid } })).data;
+export const listLinks = async ({ rid, uid, order = "asc" }) =>
+  (await api.get("/wms/links", { params: { rid, uid, order } })).data;
+
+// export const listLinks = async ({ rid, uid }) =>
+//   (await api.get("/wms/links", { params: { std_release_id: rid, std_node_uid: uid } })).data;
 
 export const assignLinks = async ({ rid, uid, row_ids }) =>
   (await api.post("/wms/links/assign", { std_release_id: rid, std_node_uid: uid, row_ids })).data;
