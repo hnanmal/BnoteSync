@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 // import { listBatches, previewBatch, ingestWms, validateBatch } from "../shared/api/wms";
 import { uploadExcel, listBatches, previewBatch, ingestWms, validateBatch, deleteBatch } from "../shared/api/wms";
 import { useRef } from "react";
+import { FixedSizeList as List } from "react-window";
 
 function UploadBox({ onUploaded }) {
   const inputRef = useRef(null);
@@ -40,48 +41,109 @@ function UploadBox({ onUploaded }) {
   );
 }
 
-function SimpleTable({ rows }) {
-  // rows[*].payload_json 에는 top-level(code,name,qty,unit,group_code) + _raw(원본전체)
-  const flatRows = rows.map(r => {
-    const p = r.payload_json || {};
-    const flattened = { ...p, ...(p._raw || {}) }; // ✅ 원본 열 펼침
-    // 원본이 표시되면 _raw 키 자체는 제거
-    delete flattened._raw;
-    return { row_index: r.row_index, status: r.status, ...flattened };
-  });
+function VirtualTable({ rows }) {
+  // ✅ rows가 바뀔 때만 전개/컬럼 계산 (불필요한 재계산 차단)
+  const { flatRows, columns } = useMemo(() => {
+    const flat = rows.map((r) => {
+      const p = r.payload_json || {};
+      const flattened = { ...p, ...(p._raw || {}) };
+      delete flattened._raw;
+      return { row_index: r.row_index, status: r.status, ...flattened };
+    });
 
-  const columns = Array.from(
-    new Set(
-      flatRows.reduce((acc, r) => {
-        Object.keys(r).forEach(k => acc.push(k));
-        return acc;
-      }, [])
-    )
+    // 컬럼 순서: 고정 키 → 동적 키(사전순)
+    const fixed = ["row_index", "status"];
+    const dyn = Array.from(
+      new Set(
+        flat.flatMap((r) => Object.keys(r))
+      )
+    ).filter((k) => !fixed.includes(k));
+    dyn.sort();
+
+    return { flatRows: flat, columns: [...fixed, ...dyn] };
+  }, [rows]);
+
+  const rowHeight = 36;
+  const header = (
+    <div className="grid grid-flow-col auto-cols-fr bg-gray-50 px-2 py-1 font-medium border-b">
+      {columns.map((c) => (
+        <div key={c} className="truncate">{c}</div>
+      ))}
+    </div>
   );
 
+  // 가시 높이: 행 수에 따라 최소/최대 clamp
+  const height = Math.min(560, Math.max(240, flatRows.length * rowHeight));
+
+  const Row = ({ index, style }) => {
+    const r = flatRows[index];
+    return (
+      <div style={style} className={`grid grid-flow-col auto-cols-fr px-2 py-1 border-b ${index % 2 ? "bg-gray-50" : "bg-white"}`}>
+        {columns.map((c) => (
+          <div key={c} className="truncate">{r[c] == null ? "" : String(r[c])}</div>
+        ))}
+      </div>
+    );
+  };
+
   return (
-    <div className="overflow-auto border rounded">
-      <table className="min-w-full text-sm">
-        <thead className="bg-gray-50">
-          <tr>
-            {columns.map(c => <th key={c} className="text-left p-2 border-b">{c}</th>)}
-          </tr>
-        </thead>
-        <tbody>
-          {flatRows.map((r, idx) => (
-            <tr key={idx} className="odd:bg-white even:bg-gray-50">
-              {columns.map(c => (
-                <td key={c} className="p-2 border-b">
-                  {r[c] == null ? "" : String(r[c])}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="overflow-hidden border rounded">
+      {header}
+      <List
+        height={height}
+        itemCount={flatRows.length}
+        itemSize={rowHeight}
+        width={"100%"}
+      >
+        {Row}
+      </List>
     </div>
   );
 }
+
+
+// function SimpleTable({ rows }) {
+//   // rows[*].payload_json 에는 top-level(code,name,qty,unit,group_code) + _raw(원본전체)
+//   const flatRows = rows.map(r => {
+//     const p = r.payload_json || {};
+//     const flattened = { ...p, ...(p._raw || {}) }; // ✅ 원본 열 펼침
+//     // 원본이 표시되면 _raw 키 자체는 제거
+//     delete flattened._raw;
+//     return { row_index: r.row_index, status: r.status, ...flattened };
+//   });
+
+//   const columns = Array.from(
+//     new Set(
+//       flatRows.reduce((acc, r) => {
+//         Object.keys(r).forEach(k => acc.push(k));
+//         return acc;
+//       }, [])
+//     )
+//   );
+
+//   return (
+//     <div className="overflow-auto border rounded">
+//       <table className="min-w-full text-sm">
+//         <thead className="bg-gray-50">
+//           <tr>
+//             {columns.map(c => <th key={c} className="text-left p-2 border-b">{c}</th>)}
+//           </tr>
+//         </thead>
+//         <tbody>
+//           {flatRows.map((r, idx) => (
+//             <tr key={idx} className="odd:bg-white even:bg-gray-50">
+//               {columns.map(c => (
+//                 <td key={c} className="p-2 border-b">
+//                   {r[c] == null ? "" : String(r[c])}
+//                 </td>
+//               ))}
+//             </tr>
+//           ))}
+//         </tbody>
+//       </table>
+//     </div>
+//   );
+// }
 
 
 export default function WmsPage() {
@@ -92,14 +154,31 @@ export default function WmsPage() {
 
   const [pageSize, setPageSize] = useState(50); // 50 | 100 | 500 | 'ALL'
   const isAll = pageSize === 'ALL';
+  const ALL_CAP = 5000; // 안전한 상한 (필요 시 조정)
 
   const previewQ = useQuery({
     enabled: !!selected,
-    queryKey: ["wms","preview", selected, pageSize],
-    queryFn: () => previewBatch(
-      selected,
-      { limit: isAll ? undefined : pageSize, offset: 0 } // ✅ All이면 limit 미전달
-    ),
+    queryKey: ["wms", "preview", selected, pageSize],
+    queryFn: () =>
+      previewBatch(
+        selected,
+        {
+          // ✅ All이면 limit 미전달(서버 기본값) 또는 상한 적용 선택
+          limit: isAll ? undefined : pageSize,
+          offset: 0,
+        }
+      ),
+    keepPreviousData: true,
+    placeholderData: [],
+    staleTime: 30 * 1000,
+    refetchOnWindowFocus: false,
+    select: (rows) => {
+      // ⚠️ 혹시 서버가 ALL에서 너무 많이 줄 경우, 클라이언트 안전상한으로 절단
+      if (isAll && Array.isArray(rows) && rows.length > ALL_CAP) {
+        return rows.slice(0, ALL_CAP);
+      }
+      return rows;
+    },
   });
 
   const ingestM = useMutation({
@@ -224,9 +303,28 @@ export default function WmsPage() {
 
       {/* 프리뷰 */}
       <div className="p-4 bg-white rounded shadow">
-        <h3 className="font-semibold mb-2">Preview {selected ? `#${selected}` : ""}</h3>
-        {previewQ.isLoading ? <div>Loading...</div> : null}
-        {previewQ.data?.length ? <SimpleTable rows={previewQ.data} /> : <div className="text-gray-500">No rows.</div>}
+        <div className="flex items-center gap-3 mb-2">
+          <h3 className="font-semibold">Preview {selected ? `#${selected}` : ""}</h3>
+          {previewQ.isFetching ? <span className="text-xs text-gray-500">Loading…</span> : null}
+          {isAll && previewQ.data && previewQ.data.length >= ALL_CAP ? (
+            <span className="text-xs text-amber-600">
+              Showing first {ALL_CAP.toLocaleString()} rows (ALL capped for performance)
+            </span>
+          ) : null}
+          {Array.isArray(previewQ.data) ? (
+            <span className="ml-auto text-xs text-gray-500">
+              {previewQ.data.length.toLocaleString()} rows
+            </span>
+          ) : null}
+        </div>
+
+        {previewQ.isLoading ? (
+          <div>Loading...</div>
+        ) : Array.isArray(previewQ.data) && previewQ.data.length ? (
+          <VirtualTable rows={previewQ.data} />
+        ) : (
+          <div className="text-gray-500">No rows.</div>
+        )}
       </div>
     </div>
   );

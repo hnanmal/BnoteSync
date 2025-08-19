@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useTransition, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   listStdReleases, getStdTree, createStdNode, updateStdNode, deleteStdNode
@@ -9,14 +9,102 @@ import {
 import { buildOrderedRawColumns, normalizeLabel } from "../shared/api/columnOrder"; // ← 경로 확인!
 import { useResizableColumns, ResizableTH, ResizableColgroup } from "../shared/ui/resizableColumns";
 
+// ✅ uid -> { node, parentUid } 매핑 생성
+function buildParentIndexFromChildren(rootChildren) {
+  const map = new Map(); // uid -> { node, parentUid }
+  const dfs = (node, parentUid = null) => {
+    map.set(node.std_node_uid, { node, parentUid });
+    (node.children ?? []).forEach(ch => dfs(ch, node.std_node_uid));
+  };
+  (rootChildren ?? []).forEach(r => dfs(r, null));
+  return map;
+}
+
+// ✅ 선택 uid에서 루트까지 경로 배열 [root, ..., selected]
+function buildPath(uid, parentIndex) {
+  if (!uid || !parentIndex.size) return [];
+  const path = [];
+  let cur = uid, hop = 0;
+  const GUARD = 10_000;
+  while (cur != null && hop < GUARD) {
+    const ent = parentIndex.get(cur);
+    if (!ent) break;
+    path.push(ent.node);
+    cur = ent.parentUid ?? null;
+    hop++;
+  }
+  return path.reverse();
+}
+
+function CompactBreadcrumb({ path, onJump }) {
+  // 중간 축약: [root, …, last-1, last]
+  const items = useMemo(() => {
+    if (!path?.length) return [];
+    if (path.length <= 3) return path.map(p => ({ type:"node", node:p }));
+    return [
+      { type:"node", node: path[0] },
+      { type:"ellipsis" },
+      ...path.slice(-2).map(p => ({ type:"node", node:p })),
+    ];
+  }, [path]);
+
+  if (!items.length) {
+    return <div className="text-xs text-gray-400 whitespace-nowrap">경로 없음</div>;
+  }
+
+  return (
+    <nav className="flex-1 min-w-0 overflow-hidden">
+      <ol className="flex items-center gap-1 text-base md:text-md whitespace-nowrap overflow-hidden">
+        {items.map((it, idx) => {
+          const isLast = idx === items.length - 1;
+          if (it.type === "ellipsis") {
+            return (
+              <span key={`e-${idx}`} className="text-gray-400">…</span>
+            );
+          }
+          const n = it.node;
+          return (
+            <span key={n.std_node_uid} className="flex items-center gap-1 min-w-0">
+              <button
+                type="button"
+                disabled={isLast}
+                onClick={() => !isLast && onJump(n.std_node_uid)}
+                title={n.name}
+                className={
+                  "max-w-[220px] truncate px-2 py-1 rounded " +
+                  (isLast ? "bg-gray-100 text-gray-800 cursor-default"
+                          : "text-blue-600 hover:bg-gray-100")
+                }
+              >
+                {n.name || "(no name)"}
+              </button>
+              {!isLast && <span className="text-gray-400">›</span>}
+            </span>
+          );
+        })}
+      </ol>
+    </nav>
+  );
+}
+
+
+
 
 function TreeNode({ node, onSelect, selectedUid, onAddChild, onRename, onDelete }) {
   const hasChildren = (node.children ?? []).length > 0;
   const isSel = selectedUid === node.std_node_uid;
   return (
     <div className="pl-2">
-      <div className={`flex items-center gap-2 py-0.5 ${isSel ? "bg-blue-50" : ""}`}>
-        <button className="text-left flex-1" onClick={() => onSelect(node)} title={node.path}>
+      <div
+        className={`flex items-center gap-2 py-0.5 rounded ${isSel ? "bg-blue-50" : "hover:bg-gray-50"}`}
+        aria-selected={isSel}
+      >
+        <button
+          className={`text-left flex-1 truncate px-1 focus:outline-none focus:ring-2 focus:ring-blue-300
+            ${isSel ? "font-semibold text-blue-700" : "text-gray-800"}`}
+          onClick={() => onSelect(node)}
+          title={node.path}
+        >
           {node.name}
         </button>
         <button className="text-xs px-2 py-0.5 border rounded" onClick={() => onAddChild(node)}>＋</button>
@@ -46,10 +134,15 @@ export default function StdGwmPage() {
   const [rid, setRid] = useState(null);
   const [selectedNode, setSelectedNode] = useState(null);
   const [sources, setSources] = useState(["AR","FP","SS"]);
-  const [search, setSearch] = useState("");
+  // 🔎 검색: 입력(draft)은 즉시 반영, 서버 요청은 applied가 변할 때만
+  const [searchDraft, setSearchDraft] = useState("");
+  const [searchApplied, setSearchApplied] = useState("");
+  const isComposing = useRef(false);
+  const applySearch = () => setSearchApplied(searchDraft.trim());
+  const sourcesKey = useMemo(()=> (sources||[]).join(","), [sources]); // 캐시 키 안정화
   const [selRowIds, setSelRowIds] = useState(new Set());
   const [selLinkIds, setSelLinkIds] = useState(new Set());
-  const [pageSize, setPageSize] = useState("ALL");
+  const [pageSize, setPageSize] = useState(200);
   const [order, setOrder] = useState("asc");
   
   // 릴리즈 바뀔 때 상태 리셋(안전)
@@ -77,27 +170,70 @@ export default function StdGwmPage() {
     queryFn: () => getStdTree(rid)
   });
 
+  // ✅ 트리 변동 시에만 부모 인덱스 재계산
+  const parentIndex = useMemo(() => {
+    return buildParentIndexFromChildren(treeQ.data?.children ?? []);
+  }, [treeQ.data]);
+
+  // ✅ 선택된 노드 경로 계산
+  const breadcrumbPath = useMemo(() => {
+    return buildPath(selectedNode?.std_node_uid, parentIndex);
+  }, [selectedNode?.std_node_uid, parentIndex]);
+
+  // ✅ Breadcrumb에서 중간 항목 클릭 시 점프
+  const jumpToUid = (uid) => {
+    const entry = parentIndex.get(uid);
+    if (entry?.node) setSelectedNode(entry.node);
+  };
+
+  // 선택 노드의 트리 깊이 계산
+  const selectedDepth = useMemo(() => {
+    if (!selectedNode) return null;
+    let depth = 0;
+    let cur = selectedNode.std_node_uid;
+    while (cur != null) {
+      const entry = parentIndex.get(cur);
+      if (!entry) break;
+      depth++;
+      cur = entry.parentUid;
+    }
+    return depth; // 1 = 루트, 2 = 레벨2, ...
+  }, [selectedNode, parentIndex]);
+
+  // 레벨2 여부
+  const isLevel2 = selectedDepth === 3;
+
   // WMS items (우측 하단)
   const itemsQ = useQuery({
-    queryKey: ["wms","items", sources, search, pageSize, order],
-    queryFn: () =>
+    queryKey: ["wms","items", sourcesKey, searchApplied, pageSize, order],
+    // TanStack v4: queryFn은 (ctx) 인자로 signal 제공
+    queryFn: ({ signal }) =>
       listWmsItems({
         sources,
-        search,
+        search: searchApplied,
         limit: pageSize === 'ALL' ? undefined : pageSize,
         order,
-      }),
-    refetchOnWindowFocus: false
+      }, { signal }),
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    refetchOnMount: false,
+    staleTime: 60_000,
+    placeholderData: (prev) => prev, // 이전 데이터 유지(깜빡임 방지)
+    select: (d) => {
+      // 표준화: 배열/래핑 모두 지원
+      const items = Array.isArray(d) ? d : (Array.isArray(d?.items) ? d.items : []);
+      const columns = (!Array.isArray(d) && Array.isArray(d?.columns) && d.columns.length)
+        ? d.columns
+        : buildOrderedRawColumns(items.slice(0, 300)); // 성능 위해 샘플만
+      const total = (!Array.isArray(d) && Number.isFinite(d?.total)) ? d.total : items.length;
+      return { items, columns, total };
+    },
   });
 
-  // ✅ 항상 배열로 정규화 (롤백 상태 가정)
-  const items = useMemo(() => itemsQ.data ?? [], [itemsQ.data]);
-
-  // ✅ 내가 정한 순서로 _raw 컬럼 계산 + 라벨 정리
-  const itemsColumns = useMemo(() => buildOrderedRawColumns(items), [items]);
+  const items = itemsQ.data?.items ?? [];
+  const itemsColumns = itemsQ.data?.columns ?? [];
   const displayItemsColumns = useMemo(
-    () => itemsColumns.map(k => ({ key: k, label: normalizeLabel(k) })),
-    [itemsColumns]
+    () => itemsColumns.map(k => ({ key: k, label: normalizeLabel(k) })), [itemsColumns]
   );
 
   const itemFixedCols = [
@@ -124,7 +260,11 @@ export default function StdGwmPage() {
   });
 
   const linkItems = useMemo(() => linksQ.data ?? [], [linksQ.data]);
-  const linkColumns = useMemo(() => buildOrderedRawColumns(linkItems), [linkItems]);
+  // const linkColumns = useMemo(() => buildOrderedRawColumns(linkItems), [linkItems]);
+  const linkColumns = useMemo(() => {
+    const sample = linkItems.length > 300 ? linkItems.slice(0, 300) : linkItems;
+    return buildOrderedRawColumns(sample);
+  }, [linkItems]);
   const displayLinkColumns = useMemo(
     () => linkColumns.map(k => ({ key: k, label: normalizeLabel(k) })),
     [linkColumns]
@@ -268,6 +408,12 @@ export default function StdGwmPage() {
 
   return (
     <div className="flex h-full w-full flex-col p-4">
+      {/* DEBUG: 필요시 유지, 평상시 주석 */}
+      {/* <div className="px-3 py-1 text-xs text-gray-500">
+        status: {itemsQ.status} / fetch: {itemsQ.fetchStatus}
+        / count: {items.length} / cols: {itemsColumns.length}
+        {itemsQ.isFetching && " (fetching…)"}
+      </div> */}
       {/* 헤더: Release 선택 */}
       <div className="mb-3 flex items-center gap-2">
         <h2 className="text-xl font-semibold">Standard GWM</h2>
@@ -285,8 +431,10 @@ export default function StdGwmPage() {
             <option key={r.id} value={String(r.id)}>{r.version}</option>
           ))}
         </select>
-      </div>
 
+        {/* ▼ 릴리즈 셀렉터 오른쪽에 컴팩트 브레드크럼을 붙임 */}
+        <CompactBreadcrumb path={breadcrumbPath} onJump={jumpToUid} />
+      </div>
       <div className="grid grid-cols-12 gap-3 h-[calc(100vh-140px)]">
         {/* 좌측: 트리 + CRUD */}
         <div className="col-span-3 bg-white rounded shadow p-2 overflow-auto">
@@ -343,12 +491,14 @@ export default function StdGwmPage() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <button
-                  className="px-3 py-1 border rounded disabled:opacity-50"
-                  disabled={!selectedNode || selRowIds.size===0}
-                  onClick={()=>assignM.mutate()}
-                  title="아래 WMS Items 테이블에서 선택한 행을 현재 노드에 할당"
-                >Assign selected ↓</button>
+              <button
+                className="px-3 py-1 border rounded disabled:opacity-50"
+                disabled={!selectedNode || selRowIds.size===0 || !isLevel2}
+                onClick={()=>assignM.mutate()}
+                title="레벨2 노드에서만 할당 가능"
+              >
+                Assign selected ↓
+              </button>
                 <button
                   className="px-3 py-1 border rounded disabled:opacity-50 text-red-600"
                   disabled={!selectedNode || selLinkIds.size===0}
@@ -433,12 +583,34 @@ export default function StdGwmPage() {
                   {s}
                 </label>
               ))}
-              <input
-                className="border rounded px-2 py-1 text-sm ml-auto"
-                placeholder="Search any column..."
-                value={search}
-                onChange={(e)=>setSearch(e.target.value)}
-              />
+              <div className="ml-auto flex items-center gap-2">
+                <input
+                  className="border rounded px-2 py-1 text-sm"
+                  placeholder="Search (press Enter)…"
+                  value={searchDraft}
+                  onChange={(e)=>setSearchDraft(e.target.value)}
+                  onKeyDown={(e)=>{
+                    if (e.key === 'Enter' && !isComposing.current) applySearch();
+                    if (e.key === 'Escape') { setSearchDraft(""); setSearchApplied(""); }
+                  }}
+                  onCompositionStart={()=>{ isComposing.current = true; }}
+                  onCompositionEnd={(e)=>{ isComposing.current = false; setSearchDraft(e.currentTarget.value); }}
+                />
+                <button
+                  className="px-3 py-1 border rounded text-sm"
+                  onClick={applySearch}
+                  disabled={searchDraft.trim() === searchApplied.trim()}
+                  title="Apply search"
+                >Search</button>
+                <button
+                  className="px-2 py-1 border rounded text-sm"
+                  onClick={()=>{ setSearchDraft(""); setSearchApplied(""); }}
+                  title="Clear"
+                >Clear</button>
+                {searchDraft !== searchApplied && (
+                  <span className="text-xs text-gray-500">pending… (press Enter)</span>
+                )}
+              </div>
               <label className="text-sm">Rows:</label>
               <select
                 className="border rounded px-2 py-1"
