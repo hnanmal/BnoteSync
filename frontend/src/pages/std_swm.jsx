@@ -124,8 +124,8 @@ function TreeNode({ node, onSelect, selectedUid, onAddChild, onRename, onDelete 
   );
 }
 
-export default function StdGwmPage() {
-  const KIND = "GWM"; // ⭐ 이 페이지는 GWM 전용
+export default function StdSwmPage() {
+  const KIND = "SWM"; // ⭐ 이 페이지는 GWM 전용
   const qc = useQueryClient();
   const [rid, setRid] = useState(null);
   const [selectedNode, setSelectedNode] = useState(null);
@@ -161,7 +161,7 @@ export default function StdGwmPage() {
   const treeQ = useQuery({
     enabled: !!rid,
     queryKey: ["std","tree",rid,KIND],        // ⭐ 캐시 키에 KIND 포함
-    queryFn: () => getStdTree(rid, { kind: KIND }) // ⭐ 서버에 kind=GWM 전달
+    queryFn: () => getStdTree(rid, { kind: KIND }) // ⭐ 서버에 kind=SWM 전달
   });
 
   const parentIndex = useMemo(() => {
@@ -314,7 +314,7 @@ export default function StdGwmPage() {
       return createStdNode(
         rid,
         payload,
-        { kind: parent ? undefined : KIND } // ⭐ 루트면 kind=GWM
+        { kind: parent ? undefined : KIND } // ⭐ 루트면 kind=SWM
       );
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["std","tree", rid, KIND] }), // ⭐ KIND 포함
@@ -393,7 +393,7 @@ export default function StdGwmPage() {
     <div className="flex h-full w-full flex-col p-4">
       {/* 헤더: Release 선택 */}
       <div className="mb-3 flex items-center gap-2">
-        <h2 className="text-xl font-semibold">Standard GWM</h2>
+        <h2 className="text-xl font-semibold">Standard SWM</h2>
         <select
           className="border rounded px-2 py-1"
           value={Number.isFinite(rid) ? String(rid) : ""}
@@ -416,7 +416,7 @@ export default function StdGwmPage() {
         {/* 좌측: 트리 + CRUD */}
         <div className="col-span-3 bg-white rounded shadow p-2 overflow-auto">
           <div className="flex items-center justify-between mb-2">
-            <span className="font-medium">StdGWM Tree</span>
+            <span className="font-medium">StdSWM Tree</span>
             <button
               className="text-sm px-2 py-1 border rounded disabled:opacity-50"
               disabled={!rid}
@@ -425,7 +425,7 @@ export default function StdGwmPage() {
                 const name = prompt("Root node name?", "GWM");
                 if (!name) return;
                 const uid = toUID(name) || `GWM_${Date.now()}`;
-                // ⭐ 루트 생성은 kind=GWM 전달
+                // ⭐ 루트 생성은 kind=SWM 전달
                 addM.mutate({ parent: null, name, uid });
               }}
             >＋ Root</button>

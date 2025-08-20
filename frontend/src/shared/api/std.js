@@ -1,20 +1,32 @@
+// src/shared/api/std.js
 import { api } from "./index";
 
 export const listStdReleases = async () => {
   const { data } = await api.get("/std/releases");
-  return data; // [{id, version}, ...]
+  return data; // [{ id, version }, ...]
 };
 
-export const getStdTree = async (releaseId) => {
-  const { data } = await api.get(`/std/releases/${releaseId}/tree`);
-  return data; // [{ std_node_uid, name, children: [...] }, ...]
+// ✅ kind 쿼리 전달 지원
+export const getStdTree = async (releaseId, { kind } = {}) => {
+  const params = {};
+  if (kind) params.kind = kind; // "GWM" | "SWM"
+  const { data } = await api.get(`/std/releases/${releaseId}/tree`, { params });
+  return data; // { children: [...] }
 };
 
-// std.js
+// ✅ 루트 생성 시에만 kind 전달(자식은 부모 상속)
+export const createStdNode = async (rid, payload, { kind } = {}) => {
+  const params = {};
+  if (!payload?.parent_uid && kind) params.kind = kind; // 루트일 때만
+  return (await api.post(`/std/releases/${rid}/nodes`, payload, { params })).data;
+};
 
-export const createStdNode = async (rid, payload) => (await api.post(`/std/releases/${rid}/nodes`, payload)).data;
-export const updateStdNode = async (rid, uid, payload) => (await api.patch(`/std/releases/${rid}/nodes/${uid}`, payload)).data;
-export const deleteStdNode = async (rid, uid) => (await api.delete(`/std/releases/${rid}/nodes/${uid}`)).data;
+export const updateStdNode = async (rid, uid, payload) =>
+  (await api.patch(`/std/releases/${rid}/nodes/${uid}`, payload)).data;
+
+export const deleteStdNode = async (rid, uid) =>
+  (await api.delete(`/std/releases/${rid}/nodes/${uid}`)).data;
+
 
 // wms.js (추가)
 export const listWmsItems = async ({ sources, search, limit, offset=0 } = {}) => {

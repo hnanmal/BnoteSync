@@ -34,8 +34,9 @@ export default function App() {
       <aside className={`bg-white p-2 overflow-auto ${isCollapsed ? "" : "border-r"}`} aria-expanded={!isCollapsed}>
         {!isCollapsed && (
           <nav className="space-y-1">
-            <NavLink to="/standards">Standards</NavLink>
+            {/* <NavLink to="/standards">Standards</NavLink> */}
             <NavLink to="/standards/gwm">Std-GWM</NavLink>
+            <NavLink to="/standards/swm">Std-SWM</NavLink>
             <NavLink to="/projects/1">Projects</NavLink>
             <NavLink to="/calc">Calc</NavLink>
             <NavLink to="/wms">WMS</NavLink>

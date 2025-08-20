@@ -1,4 +1,5 @@
 from __future__ import annotations
+import enum  # ✅ 추가
 from datetime import datetime  # ✅ 이 줄 추가
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy import (
@@ -11,6 +12,7 @@ from sqlalchemy import (
     JSON,
     func,
     DateTime,
+    Enum as SAEnum,  # ✅ 추가
 )
 from ..shared.db import Base
 
@@ -24,6 +26,11 @@ class StdRelease(Base):
     nodes: Mapped[list["StdNode"]] = relationship(
         back_populates="release", cascade="all, delete-orphan"
     )
+
+
+class StdKind(enum.Enum):
+    GWM = "GWM"
+    SWM = "SWM"
 
 
 class StdNode(Base):
@@ -43,11 +50,20 @@ class StdNode(Base):
     path: Mapped[str] = mapped_column(Text, nullable=False, default="")  # e.g. "EARTH/EXCAVATION"
     parent_path: Mapped[str] = mapped_column(Text, nullable=True)  # e.g. "EARTH"
 
+    # ✅ 새 컬럼: GWM/SWM 구분 (DB Enum 이름 고정)
+    std_kind: Mapped[StdKind] = mapped_column(
+        SAEnum(StdKind, name="std_kind_enum"),
+        nullable=False,
+        default=StdKind.GWM,
+        index=True,
+    )
+
     values_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     release: Mapped["StdRelease"] = relationship(back_populates="nodes")
 
     __table_args__ = (
         UniqueConstraint("std_release_id", "std_node_uid", name="uq_release_uid"),
-        Index("ix_nodes_release_path", "std_release_id", "path"),
+        # Index("ix_nodes_release_path", "std_release_id", "path"),
+        Index("ix_nodes_release_kind_path", "std_release_id", "std_kind", "path"),
     )

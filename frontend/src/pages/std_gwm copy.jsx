@@ -6,12 +6,12 @@ import {
 import {
   listWmsItems, listLinks, assignLinks, unassignLinks
 } from "../shared/api/wms";
-import { buildOrderedRawColumns, normalizeLabel } from "../shared/api/columnOrder";
+import { buildOrderedRawColumns, normalizeLabel } from "../shared/api/columnOrder"; // ← 경로 확인!
 import { useResizableColumns, ResizableTH, ResizableColgroup } from "../shared/ui/resizableColumns";
 
-// uid -> { node, parentUid } 매핑 생성
+// ✅ uid -> { node, parentUid } 매핑 생성
 function buildParentIndexFromChildren(rootChildren) {
-  const map = new Map();
+  const map = new Map(); // uid -> { node, parentUid }
   const dfs = (node, parentUid = null) => {
     map.set(node.std_node_uid, { node, parentUid });
     (node.children ?? []).forEach(ch => dfs(ch, node.std_node_uid));
@@ -20,7 +20,7 @@ function buildParentIndexFromChildren(rootChildren) {
   return map;
 }
 
-// 선택 uid에서 루트까지 경로 배열 [root, ..., selected]
+// ✅ 선택 uid에서 루트까지 경로 배열 [root, ..., selected]
 function buildPath(uid, parentIndex) {
   if (!uid || !parentIndex.size) return [];
   const path = [];
@@ -37,6 +37,7 @@ function buildPath(uid, parentIndex) {
 }
 
 function CompactBreadcrumb({ path, onJump }) {
+  // 중간 축약: [root, …, last-1, last]
   const items = useMemo(() => {
     if (!path?.length) return [];
     if (path.length <= 3) return path.map(p => ({ type:"node", node:p }));
@@ -53,12 +54,13 @@ function CompactBreadcrumb({ path, onJump }) {
 
   return (
     <nav className="flex-1 min-w-0 overflow-hidden">
-      {/* ⭐ 글씨 크기 고정: md:text-lg (기존 md:text-md 오타 수정) */}
-      <ol className="flex items-center gap-1 text-base md:text-lg whitespace-nowrap overflow-hidden">
+      <ol className="flex items-center gap-1 text-base md:text-md whitespace-nowrap overflow-hidden">
         {items.map((it, idx) => {
           const isLast = idx === items.length - 1;
           if (it.type === "ellipsis") {
-            return <span key={`e-${idx}`} className="text-gray-400">…</span>;
+            return (
+              <span key={`e-${idx}`} className="text-gray-400">…</span>
+            );
           }
           const n = it.node;
           return (
@@ -84,6 +86,9 @@ function CompactBreadcrumb({ path, onJump }) {
     </nav>
   );
 }
+
+
+
 
 function TreeNode({ node, onSelect, selectedUid, onAddChild, onRename, onDelete }) {
   const hasChildren = (node.children ?? []).length > 0;
@@ -125,21 +130,22 @@ function TreeNode({ node, onSelect, selectedUid, onAddChild, onRename, onDelete 
 }
 
 export default function StdGwmPage() {
-  const KIND = "GWM"; // ⭐ 이 페이지는 GWM 전용
   const qc = useQueryClient();
   const [rid, setRid] = useState(null);
   const [selectedNode, setSelectedNode] = useState(null);
   const [sources, setSources] = useState(["AR","FP","SS"]);
+  // 🔎 검색: 입력(draft)은 즉시 반영, 서버 요청은 applied가 변할 때만
   const [searchDraft, setSearchDraft] = useState("");
   const [searchApplied, setSearchApplied] = useState("");
   const isComposing = useRef(false);
   const applySearch = () => setSearchApplied(searchDraft.trim());
-  const sourcesKey = useMemo(()=> (sources||[]).join(","), [sources]);
+  const sourcesKey = useMemo(()=> (sources||[]).join(","), [sources]); // 캐시 키 안정화
   const [selRowIds, setSelRowIds] = useState(new Set());
   const [selLinkIds, setSelLinkIds] = useState(new Set());
   const [pageSize, setPageSize] = useState(200);
   const [order, setOrder] = useState("asc");
   
+  // 릴리즈 바뀔 때 상태 리셋(안전)
   useEffect(() => {
     setSelectedNode(null);
     setSelRowIds(new Set());
@@ -157,26 +163,30 @@ export default function StdGwmPage() {
     }
   });
 
-  // Tree (⭐ kind 포함)
+  // Tree
   const treeQ = useQuery({
     enabled: !!rid,
-    queryKey: ["std","tree",rid,KIND],        // ⭐ 캐시 키에 KIND 포함
-    queryFn: () => getStdTree(rid, { kind: KIND }) // ⭐ 서버에 kind=GWM 전달
+    queryKey: ["std","tree",rid],
+    queryFn: () => getStdTree(rid)
   });
 
+  // ✅ 트리 변동 시에만 부모 인덱스 재계산
   const parentIndex = useMemo(() => {
     return buildParentIndexFromChildren(treeQ.data?.children ?? []);
   }, [treeQ.data]);
 
+  // ✅ 선택된 노드 경로 계산
   const breadcrumbPath = useMemo(() => {
     return buildPath(selectedNode?.std_node_uid, parentIndex);
   }, [selectedNode?.std_node_uid, parentIndex]);
 
+  // ✅ Breadcrumb에서 중간 항목 클릭 시 점프
   const jumpToUid = (uid) => {
     const entry = parentIndex.get(uid);
     if (entry?.node) setSelectedNode(entry.node);
   };
 
+  // 선택 노드의 트리 깊이 계산
   const selectedDepth = useMemo(() => {
     if (!selectedNode) return null;
     let depth = 0;
@@ -187,14 +197,16 @@ export default function StdGwmPage() {
       depth++;
       cur = entry.parentUid;
     }
-    return depth;
+    return depth; // 1 = 루트, 2 = 레벨2, ...
   }, [selectedNode, parentIndex]);
 
+  // 레벨2 여부
   const isLevel2 = selectedDepth === 3;
 
-  // WMS items
+  // WMS items (우측 하단)
   const itemsQ = useQuery({
     queryKey: ["wms","items", sourcesKey, searchApplied, pageSize, order],
+    // TanStack v4: queryFn은 (ctx) 인자로 signal 제공
     queryFn: ({ signal }) =>
       listWmsItems({
         sources,
@@ -206,12 +218,13 @@ export default function StdGwmPage() {
     refetchOnReconnect: false,
     refetchOnMount: false,
     staleTime: 60_000,
-    placeholderData: (prev) => prev,
+    placeholderData: (prev) => prev, // 이전 데이터 유지(깜빡임 방지)
     select: (d) => {
+      // 표준화: 배열/래핑 모두 지원
       const items = Array.isArray(d) ? d : (Array.isArray(d?.items) ? d.items : []);
       const columns = (!Array.isArray(d) && Array.isArray(d?.columns) && d.columns.length)
         ? d.columns
-        : buildOrderedRawColumns(items.slice(0, 300));
+        : buildOrderedRawColumns(items.slice(0, 300)); // 성능 위해 샘플만
       const total = (!Array.isArray(d) && Number.isFinite(d?.total)) ? d.total : items.length;
       return { items, columns, total };
     },
@@ -224,7 +237,7 @@ export default function StdGwmPage() {
   );
 
   const itemFixedCols = [
-    { key: "__sel__", label: "" },
+    { key: "__sel__", label: "" },   // 체크박스
     { key: "row_id", label: "row_id" },
     { key: "source", label: "source" },
     { key: "code", label: "code" },
@@ -239,7 +252,7 @@ export default function StdGwmPage() {
   
   const { widths: itemsColW, onMouseDown: startResizeItems } = useResizableColumns("wms-items");
 
-  // Links
+  // Links (우상단)
   const linksQ = useQuery({
     enabled: !!(rid && selectedNode),
     queryKey: ["wms","links", rid, selectedNode?.std_node_uid],
@@ -247,6 +260,7 @@ export default function StdGwmPage() {
   });
 
   const linkItems = useMemo(() => linksQ.data ?? [], [linksQ.data]);
+  // const linkColumns = useMemo(() => buildOrderedRawColumns(linkItems), [linkItems]);
   const linkColumns = useMemo(() => {
     const sample = linkItems.length > 300 ? linkItems.slice(0, 300) : linkItems;
     return buildOrderedRawColumns(sample);
@@ -257,7 +271,7 @@ export default function StdGwmPage() {
   );
 
   const linkFixedCols = [
-    { key: "__link_sel__", label: "" },
+    { key: "__link_sel__", label: "" }, // 선택 체크박스
     { key: "row_id", label: "row_id" },
     { key: "source", label: "source" },
     { key: "code",   label: "code" },
@@ -272,6 +286,8 @@ export default function StdGwmPage() {
 
   const { widths: linksColW, onMouseDown: startResizeLinks } = useResizableColumns("wms-links");
 
+
+  // 1) 트리에서 모든 UID 수집
   function collectUids(rootChildren) {
     const set = new Set();
     const walk = (n) => {
@@ -282,6 +298,7 @@ export default function StdGwmPage() {
     return set;
   }
 
+  // 2) 중복 회피 함수
   function uniqueUid(base, taken) {
     let cand = base.slice(0, 64);
     if (!cand) cand = `NODE_${Date.now()}`;
@@ -291,6 +308,7 @@ export default function StdGwmPage() {
     return `${cand}_${i}`.slice(0, 64);
   }
 
+  // 간단 UID 변환기
   function toUID(name) {
     return name
       .trim()
@@ -302,33 +320,27 @@ export default function StdGwmPage() {
 
   // CRUD mutations
   const addM = useMutation({
-    // ⭐ 루트 생성 시에만 kind 전달, 자식은 부모 상속
     mutationFn: ({ parent, name, uid }) => {
       const finalUid = uid ?? (toUID(name) || `NODE_${Date.now()}`);
-      const payload = {
+      return createStdNode(rid, {
         parent_uid: parent?.std_node_uid ?? null,
         std_node_uid: finalUid,
         name,
         order_index: 0,
-      };
-      return createStdNode(
-        rid,
-        payload,
-        { kind: parent ? undefined : KIND } // ⭐ 루트면 kind=GWM
-      );
+      });
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["std","tree", rid, KIND] }), // ⭐ KIND 포함
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["std","tree", rid] }),
   });
 
   const renameM = useMutation({
     mutationFn: ({ node, name }) => updateStdNode(rid, node.std_node_uid, { name }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["std","tree",rid,KIND] }), // ⭐
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["std","tree",rid] }),
   });
 
   const delM = useMutation({
     mutationFn: (node) => deleteStdNode(rid, node.std_node_uid),
     onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: ["std","tree", rid, KIND] }); // ⭐
+      qc.invalidateQueries({ queryKey: ["std","tree", rid] });
       if (selectedNode?.std_node_uid === variables.std_node_uid) setSelectedNode(null);
     },
   });
@@ -342,6 +354,7 @@ export default function StdGwmPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["wms","links",rid,selectedNode?.std_node_uid] })
   });
 
+  // ✅ Assignments 일괄 Unassign
   const unassignSelectedM = useMutation({
     mutationFn: () => unassignLinks({
       rid, uid: selectedNode.std_node_uid, row_ids: Array.from(selLinkIds)
@@ -352,14 +365,18 @@ export default function StdGwmPage() {
     }
   });
 
+  // UI helpers
   const toggleRow = (id) => setSelRowIds(prev => {
     const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
   });
 
+  // ✅ Assignments 선택 토글
   const toggleLinkRow = (id) => setSelLinkIds(prev => {
     const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
   });
 
+
+  // ✅ Assignments 페이지 전체 선택/해제
   const allLinksSelectedOnPage = useMemo(() => {
     const ids = new Set(linkItems.map(r => r.row_id));
     return ids.size>0 && Array.from(ids).every(id => selLinkIds.has(id));
@@ -391,6 +408,12 @@ export default function StdGwmPage() {
 
   return (
     <div className="flex h-full w-full flex-col p-4">
+      {/* DEBUG: 필요시 유지, 평상시 주석 */}
+      {/* <div className="px-3 py-1 text-xs text-gray-500">
+        status: {itemsQ.status} / fetch: {itemsQ.fetchStatus}
+        / count: {items.length} / cols: {itemsColumns.length}
+        {itemsQ.isFetching && " (fetching…)"}
+      </div> */}
       {/* 헤더: Release 선택 */}
       <div className="mb-3 flex items-center gap-2">
         <h2 className="text-xl font-semibold">Standard GWM</h2>
@@ -409,7 +432,7 @@ export default function StdGwmPage() {
           ))}
         </select>
 
-        {/* 릴리즈 셀렉터 오른쪽에 컴팩트 브레드크럼 */}
+        {/* ▼ 릴리즈 셀렉터 오른쪽에 컴팩트 브레드크럼을 붙임 */}
         <CompactBreadcrumb path={breadcrumbPath} onJump={jumpToUid} />
       </div>
       <div className="grid grid-cols-12 gap-3 h-[calc(100vh-140px)]">
@@ -425,7 +448,6 @@ export default function StdGwmPage() {
                 const name = prompt("Root node name?", "GWM");
                 if (!name) return;
                 const uid = toUID(name) || `GWM_${Date.now()}`;
-                // ⭐ 루트 생성은 kind=GWM 전달
                 addM.mutate({ parent: null, name, uid });
               }}
             >＋ Root</button>
@@ -442,7 +464,7 @@ export default function StdGwmPage() {
                 const base = toUID(name) || `NODE_${Date.now()}`;
                 const taken = collectUids(treeQ.data?.children ?? []);
                 const uid = uniqueUid(base, taken);
-                addM.mutate({ parent, name, uid }); // 자식은 부모 상속
+                addM.mutate({ parent, name, uid });
               }}
               onRename={(node)=>{
                 if (!rid) { alert("먼저 Release를 선택하세요."); return; }
@@ -469,14 +491,14 @@ export default function StdGwmPage() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <button
-                  className="px-3 py-1 border rounded disabled:opacity-50"
-                  disabled={!selectedNode || selRowIds.size===0 || !isLevel2}
-                  onClick={()=>assignM.mutate()}
-                  title="레벨2 노드에서만 할당 가능"
-                >
-                  Assign selected ↓
-                </button>
+              <button
+                className="px-3 py-1 border rounded disabled:opacity-50"
+                disabled={!selectedNode || selRowIds.size===0 || !isLevel2}
+                onClick={()=>assignM.mutate()}
+                title="레벨2 노드에서만 할당 가능"
+              >
+                Assign selected ↓
+              </button>
                 <button
                   className="px-3 py-1 border rounded disabled:opacity-50 text-red-600"
                   disabled={!selectedNode || selLinkIds.size===0}
