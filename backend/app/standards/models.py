@@ -17,11 +17,24 @@ from sqlalchemy import (
 from ..shared.db import Base
 
 
+class ReleaseStatus(str, enum.Enum):
+    DRAFT = "DRAFT"
+    ACTIVE = "ACTIVE"
+    ARCHIVED = "ARCHIVED"
+
+
 class StdRelease(Base):
     __tablename__ = "std_release"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     version: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())  # ✅
+
+    # ✅ 새 컬럼
+    status: Mapped[ReleaseStatus] = mapped_column(
+        SAEnum(ReleaseStatus, name="release_status_enum"),
+        nullable=False,
+        default=ReleaseStatus.DRAFT,
+    )
 
     nodes: Mapped[list["StdNode"]] = relationship(
         back_populates="release", cascade="all, delete-orphan"

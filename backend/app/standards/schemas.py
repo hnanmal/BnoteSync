@@ -9,6 +9,13 @@ from pydantic import ConfigDict  # ✅ v2
 # ------------------------
 # Release
 # ------------------------
+# 릴리즈 상태 Enum (응답 직렬화용)
+class ReleaseStatus(str, Enum):
+    DRAFT = "DRAFT"
+    ACTIVE = "ACTIVE"
+    ARCHIVED = "ARCHIVED"
+
+
 class StdReleaseCreate(BaseModel):
     version: str = Field(min_length=1, max_length=64)
 
@@ -17,6 +24,18 @@ class StdReleaseOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)  # ✅ ORM 출력 허용
     id: int
     version: str
+    status: ReleaseStatus  # ✅ 추가
+
+
+# 새 드래프트(복제) 입력
+class StdReleaseCloneIn(BaseModel):
+    version: str = Field(min_length=1, max_length=64)
+    copy_links: bool = True
+
+
+# 상태 변경 입력
+class StdReleaseStatusIn(BaseModel):
+    status: ReleaseStatus
 
 
 # ------------------------

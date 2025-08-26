@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, useTransition, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  listStdReleases, getStdTree, createStdNode, updateStdNode, deleteStdNode
+  listStdReleases, getStdTree, createStdNode, updateStdNode, deleteStdNode, cloneRelease, setReleaseStatus,
 } from "../shared/api/std";
 import {
   listWmsItems, listLinks, assignLinks, unassignLinks
@@ -85,7 +85,7 @@ function CompactBreadcrumb({ path, onJump }) {
   );
 }
 
-function TreeNode({ node, onSelect, selectedUid, onAddChild, onRename, onDelete }) {
+function TreeNode({ node, onSelect, selectedUid, onAddChild, onRename, onDelete, canEdit }) {
   const hasChildren = (node.children ?? []).length > 0;
   const isSel = selectedUid === node.std_node_uid;
   return (
@@ -102,9 +102,15 @@ function TreeNode({ node, onSelect, selectedUid, onAddChild, onRename, onDelete 
         >
           {node.name}
         </button>
-        <button className="text-xs px-2 py-0.5 border rounded" onClick={() => onAddChild(node)}>＋</button>
+        <button className="text-xs px-2 py-0.5 border rounded disabled:opacity-50"
+                disabled={!canEdit} onClick={() => onAddChild(node)}>＋</button>
+        <button className="text-xs px-2 py-0.5 border rounded disabled:opacity-50"
+                disabled={!canEdit} onClick={() => onRename(node)}>✎</button>
+        <button className="text-xs px-2 py-0.5 border rounded text-red-600 disabled:opacity-50"
+                disabled={!canEdit} onClick={() => onDelete(node)}>🗑</button>
+        {/* <button className="text-xs px-2 py-0.5 border rounded" onClick={() => onAddChild(node)}>＋</button>
         <button className="text-xs px-2 py-0.5 border rounded" onClick={() => onRename(node)}>✎</button>
-        <button className="text-xs px-2 py-0.5 border rounded text-red-600" onClick={() => onDelete(node)}>🗑</button>
+        <button className="text-xs px-2 py-0.5 border rounded text-red-600" onClick={() => onDelete(node)}>🗑</button> */}
       </div>
       {hasChildren && (
         <div className="pl-3 border-l">
@@ -116,6 +122,7 @@ function TreeNode({ node, onSelect, selectedUid, onAddChild, onRename, onDelete 
               onAddChild={onAddChild}
               onRename={onRename}
               onDelete={onDelete}
+              canEdit={canEdit}   // ✅ 재귀에도 전달
             />
           ))}
         </div>
@@ -128,6 +135,8 @@ export default function StdGwmPage() {
   const KIND = "GWM"; // ⭐ 이 페이지는 GWM 전용
   const qc = useQueryClient();
   const [rid, setRid] = useState(null);
+  const [releaseStatus, setReleaseStatusLocal] = useState("DRAFT");
+  const isDraft = releaseStatus === "DRAFT";
   const [selectedNode, setSelectedNode] = useState(null);
   const [sources, setSources] = useState(["AR","FP","SS"]);
   const [searchDraft, setSearchDraft] = useState("");
@@ -154,8 +163,20 @@ export default function StdGwmPage() {
         const first = Number(data[0].id);
         setRid(Number.isFinite(first) ? first : null);
       }
+      // 선택 릴리즈 상태 동기화
+      if (Number.isFinite(rid)) {
+        const found = data?.find(r => Number(r.id) === Number(rid));
+        if (found) setReleaseStatusLocal(found.status || "DRAFT");
+      }
     }
   });
+
+  // rid 변경 시 상태 재반영
+  useEffect(() => {
+    if (!relQ.data) return;
+    const found = relQ.data.find(r => Number(r.id) === Number(rid));
+    if (found) setReleaseStatusLocal(found.status || "DRAFT");
+  }, [rid, relQ.data]);
 
   // Tree (⭐ kind 포함)
   const treeQ = useQuery({
@@ -352,6 +373,31 @@ export default function StdGwmPage() {
     }
   });
 
+  // 🔹 릴리즈 액션
+  const cloneM = useMutation({
+    mutationFn: ({ baseRid, nextVersion, copyLinks }) =>
+      cloneRelease(baseRid, { version: nextVersion, copyLinks }),
+    onSuccess: (newRel) => {
+      qc.invalidateQueries({ queryKey: ["std","releases"] });
+      setRid(newRel.id);
+      setReleaseStatusLocal(newRel.status || "DRAFT");
+    }
+  });
+  const publishM = useMutation({
+    mutationFn: () => setReleaseStatus(rid, "ACTIVE"),
+    onSuccess: (rel) => {
+      setReleaseStatusLocal(rel.status);
+      qc.invalidateQueries({ queryKey:["std","releases"]});
+    }
+  });
+  const archiveM = useMutation({
+    mutationFn: () => setReleaseStatus(rid, "ARCHIVED"),
+    onSuccess: (rel) => {
+      setReleaseStatusLocal(rel.status);
+      qc.invalidateQueries({ queryKey:["std","releases"]});
+    }
+  });
+
   const toggleRow = (id) => setSelRowIds(prev => {
     const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
   });
@@ -408,9 +454,38 @@ export default function StdGwmPage() {
             <option key={r.id} value={String(r.id)}>{r.version}</option>
           ))}
         </select>
+        {/* 상태 배지 */}
+        <span className={`px-2 py-0.5 rounded text-xs ${
+          releaseStatus==="ACTIVE" ? "bg-green-100 text-green-700" :
+          releaseStatus==="ARCHIVED" ? "bg-gray-100 text-gray-600" :
+          "bg-yellow-100 text-yellow-700"
+        }`}>{releaseStatus}</span>
 
         {/* 릴리즈 셀렉터 오른쪽에 컴팩트 브레드크럼 */}
         <CompactBreadcrumb path={breadcrumbPath} onJump={jumpToUid} />
+        {/* 릴리즈 액션 */}
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            className="px-2 py-1 border rounded disabled:opacity-50"
+            disabled={!rid}
+            onClick={()=>{
+              const v = prompt("New version (e.g. GWM-2025.09)");
+              if (!v) return;
+              const copy = confirm("Copy WMS links to the new release?");
+              cloneM.mutate({ baseRid: rid, nextVersion: v, copyLinks: copy });
+            }}
+          >New draft</button>
+          <button
+            className="px-2 py-1 border rounded disabled:opacity-50"
+            disabled={!rid || !isDraft}
+            onClick={()=> { if (confirm("Publish this draft? It becomes read-only.")) publishM.mutate(); }}
+          >Publish</button>
+          <button
+            className="px-2 py-1 border rounded disabled:opacity-50"
+            disabled={!rid || releaseStatus!=="ACTIVE"}
+            onClick={()=> { if (confirm("Archive this release?")) archiveM.mutate(); }}
+          >Archive</button>
+        </div>
       </div>
       <div className="grid grid-cols-12 gap-3 h-[calc(100vh-140px)]">
         {/* 좌측: 트리 + CRUD */}
@@ -419,7 +494,7 @@ export default function StdGwmPage() {
             <span className="font-medium">StdGWM Tree</span>
             <button
               className="text-sm px-2 py-1 border rounded disabled:opacity-50"
-              disabled={!rid}
+              disabled={!rid || !isDraft}
               onClick={()=>{
                 if (!rid) { alert("먼저 Release를 선택하세요."); return; }
                 const name = prompt("Root node name?", "GWM");
@@ -437,6 +512,7 @@ export default function StdGwmPage() {
               onSelect={setSelectedNode}
               onAddChild={(parent)=>{
                 if (!Number.isFinite(rid)) return alert("먼저 Release를 선택하세요.");
+                if (!isDraft) { alert("DRAFT 상태에서만 편집할 수 있습니다."); return; };
                 const name = prompt("Child node name?");
                 if (!name) return;
                 const base = toUID(name) || `NODE_${Date.now()}`;
@@ -445,14 +521,17 @@ export default function StdGwmPage() {
                 addM.mutate({ parent, name, uid }); // 자식은 부모 상속
               }}
               onRename={(node)=>{
-                if (!rid) { alert("먼저 Release를 선택하세요."); return; }
+                if (!rid) { alert("먼저 Release를 선택하세요."); return; };
+                if (!isDraft) { alert("DRAFT 상태에서만 편집할 수 있습니다."); return; };
                 const name = prompt("New name", node.name);
                 if (name && name!==node.name) renameM.mutate({ node, name });
               }}
               onDelete={(node)=>{
-                if (!rid) { alert("먼저 Release를 선택하세요."); return; }
+                if (!rid) { alert("먼저 Release를 선택하세요."); return; };
+                if (!isDraft) { alert("DRAFT 상태에서만 편집할 수 있습니다."); return; }
                 if (confirm(`Delete "${node.name}" and all children?`)) delM.mutate(node);
               }}
+              canEdit={isDraft}
             />
           )}
         </div>
@@ -471,7 +550,7 @@ export default function StdGwmPage() {
               <div className="flex items-center gap-2">
                 <button
                   className="px-3 py-1 border rounded disabled:opacity-50"
-                  disabled={!selectedNode || selRowIds.size===0 || !isLevel2}
+                  disabled={!selectedNode || selRowIds.size===0 || !isLevel2 || !isDraft}
                   onClick={()=>assignM.mutate()}
                   title="레벨2 노드에서만 할당 가능"
                 >
@@ -479,7 +558,7 @@ export default function StdGwmPage() {
                 </button>
                 <button
                   className="px-3 py-1 border rounded disabled:opacity-50 text-red-600"
-                  disabled={!selectedNode || selLinkIds.size===0}
+                  disabled={!selectedNode || selLinkIds.size===0 || !isDraft}
                   onClick={()=>unassignSelectedM.mutate()}
                   title="상단 Assignments 테이블에서 선택한 행들 해제"
                 >Unassign selected</button>

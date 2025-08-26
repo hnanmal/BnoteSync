@@ -7,12 +7,18 @@ export const listStdReleases = async () => {
 };
 
 // ✅ kind 쿼리 전달 지원
-export const getStdTree = async (releaseId, { kind } = {}) => {
-  const params = {};
-  if (kind) params.kind = kind; // "GWM" | "SWM"
-  const { data } = await api.get(`/std/releases/${releaseId}/tree`, { params });
+// kind 필수 (백엔드: ?kind=GWM|SWM)
+export const getStdTree = async (releaseId, { kind }) => {
+  const { data } = await api.get(`/std/releases/${releaseId}/tree`, { params: { kind } });
   return data; // { children: [...] }
 };
+
+// export const getStdTree = async (releaseId, { kind } = {}) => {
+//   const params = {};
+//   if (kind) params.kind = kind; // "GWM" | "SWM"
+//   const { data } = await api.get(`/std/releases/${releaseId}/tree`, { params });
+//   return data; // { children: [...] }
+// };
 
 // ✅ 루트 생성 시에만 kind 전달(자식은 부모 상속)
 export const createStdNode = async (rid, payload, { kind } = {}) => {
@@ -27,6 +33,14 @@ export const updateStdNode = async (rid, uid, payload) =>
 export const deleteStdNode = async (rid, uid) =>
   (await api.delete(`/std/releases/${rid}/nodes/${uid}`)).data;
 
+
+// 🔹 새 드래프트(복제)
+export const cloneRelease = async (rid, { version, copyLinks = true } = {}) =>
+  (await api.post(`/std/releases/${rid}/clone`, { version, copy_links: copyLinks })).data;
+
+// 🔹 릴리즈 상태 변경
+export const setReleaseStatus = async (rid, status) =>
+  (await api.patch(`/std/releases/${rid}/status`, { status })).data;
 
 // wms.js (추가)
 export const listWmsItems = async ({ sources, search, limit, offset=0 } = {}) => {
