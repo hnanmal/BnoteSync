@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, useTransition, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  listStdReleases, getStdTree, createStdNode, updateStdNode, deleteStdNode, cloneRelease, setReleaseStatus,
+  listStdReleases, getStdTree, createStdNode, updateStdNode, deleteStdNode, cloneRelease, setReleaseStatus,copyLinksFromRelease,
 } from "../shared/api/std";
 import {
   listWmsItems, listLinks, assignLinks, unassignLinks
@@ -261,10 +261,25 @@ export default function StdGwmPage() {
   const { widths: itemsColW, onMouseDown: startResizeItems } = useResizableColumns("wms-items");
 
   // Links
+  // const linksQ = useQuery({
+  //   enabled: !!(rid && selectedNode),
+  //   queryKey: ["wms","links", rid, selectedNode?.std_node_uid],
+  //   queryFn: () => listLinks({ rid, uid: selectedNode.std_node_uid })
+  // });
+
+  // linkSource: 링크 테이블에 적용할 단일 소스 (복수 선택이면 null)
+  const linkSource = sources.length === 1 ? sources[0] : null;
+
   const linksQ = useQuery({
     enabled: !!(rid && selectedNode),
-    queryKey: ["wms","links", rid, selectedNode?.std_node_uid],
-    queryFn: () => listLinks({ rid, uid: selectedNode.std_node_uid })
+    queryKey: ["wms","links", rid, selectedNode?.std_node_uid, linkSource],
+    queryFn: () => listLinks({
+      rid,
+      uid: selectedNode.std_node_uid,
+      source: linkSource,        // 단일 소스일 때만 지정
+      current_only: true,        // 기본 current만
+      // 배치 잠금이 필요하면 batch_id도 넘겨주세요
+    }),
   });
 
   const linkItems = useMemo(() => linksQ.data ?? [], [linksQ.data]);
@@ -463,6 +478,37 @@ export default function StdGwmPage() {
 
         {/* 릴리즈 셀렉터 오른쪽에 컴팩트 브레드크럼 */}
         <CompactBreadcrumb path={breadcrumbPath} onJump={jumpToUid} />
+        {/* ② 버전명으로 검색/선택(간단 프롬프트 버전) */}
+        <button
+          className="px-2 py-1 border rounded disabled:opacity-50"
+          disabled={!rid || !isDraft}
+          onClick={async ()=>{
+            const v = prompt("Copy links from version (e.g. GWM-2025.08):");
+            if (!v) return;
+            try {
+              const res = await copyLinks(rid, { from_version: v, only_existing_nodes: true });
+              alert(`Copied ${res.copied} links from ${res.from_release.version}`);
+              qc.invalidateQueries({ queryKey: ["wms","links"] });
+            } catch (e) {
+              alert(e?.response?.data?.detail || e.message);
+            }
+          }}
+        >Copy Assignments by version…</button>
+        {/* <button
+          className="px-2 py-1 border rounded disabled:opacity-50"
+          disabled={!rid || !isDraft}
+          onClick={async ()=>{
+            const from = prompt("Copy links from release id?");
+            const fromRid = Number(from);
+            console.log(fromRid);
+            if (!fromRid) return;
+            const res = await copyLinksFromRelease(rid, fromRid);
+            alert(`Copied ${res.copied} links from #${fromRid} → #${rid}`);
+            qc.invalidateQueries({ queryKey: ["wms","links"] }); // 필요 시 더 촘촘히 무효화
+          }}
+        >
+          Copy links…
+        </button> */}
         {/* 릴리즈 액션 */}
         <div className="ml-auto flex items-center gap-2">
           <button

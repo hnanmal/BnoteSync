@@ -1,7 +1,8 @@
 # backend/app/standards/router.py
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import delete, or_, select
+from typing import Literal, Optional
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from sqlalchemy import delete, or_, select, text
 from sqlalchemy.orm import Session
 import sqlalchemy as sa  # ⭐ INSERT ... SELECT 등 사용
 from ..deps import get_db
@@ -379,3 +380,136 @@ def get_tree(
             roots.append(node)
 
     return {"children": roots}
+
+
+@router.post("/releases/{to_rid}/links/copy-from/{from_rid}")
+def copy_links_from_release(to_rid: int, from_rid: int, db: Session = Depends(get_db)):
+    # 대상 릴리즈는 DRAFT만 허용
+    to_rel = db.scalar(select(m.StdRelease).where(m.StdRelease.id == to_rid))
+    if not to_rel:
+        raise HTTPException(404, "Target release not found")
+    if to_rel.status != m.ReleaseStatus.DRAFT:
+        raise HTTPException(
+            409,
+            f"Target release {to_rel.version} is {to_rel.status}; only DRAFT can receive links.",
+        )
+
+    # 존재하지 않는 링크만 안전하게 복사(anti-join)
+    sql = text(
+        """
+    INSERT INTO std_wms_link (std_release_id, std_node_uid, wms_row_id)
+    SELECT :to_rid, src.std_node_uid, src.wms_row_id
+    FROM std_wms_link AS src
+    LEFT JOIN std_wms_link AS dst
+    ON dst.std_release_id = :to_rid
+    AND dst.std_node_uid  = src.std_node_uid
+    AND dst.wms_row_id        = src.wms_row_id
+    WHERE src.std_release_id = :from_rid
+    AND dst.std_release_id IS NULL
+    """
+    )
+    res = db.execute(sql, {"to_rid": to_rid, "from_rid": from_rid})
+    db.commit()
+    # 일부 드라이버에서 rowcount가 -1일 수 있으니 0 이상만 신뢰
+    copied = res.rowcount if (res.rowcount or 0) > 0 else 0
+    return {"copied": copied, "to_rid": to_rid, "from_rid": from_rid}
+
+
+@router.post("/releases/{to_rid}/links/copy")
+def copy_links(
+    to_rid: int,
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+):
+    """
+    payload 예:
+    {
+      "from_rid": 1,                          # or
+      "from_version": "GWM-2025.08",          # or
+      "from": "latest_active",                # "latest_active" 지원
+      "only_existing_nodes": true             # 대상 릴리즈에 존재하는 노드만 복사(권장)
+    }
+    """
+    to_rel = db.scalar(select(m.StdRelease).where(m.StdRelease.id == to_rid))
+    if not to_rel:
+        raise HTTPException(404, "Target release not found")
+    if to_rel.status != m.ReleaseStatus.DRAFT:
+        raise HTTPException(
+            409,
+            f"Target release {to_rel.version} is {to_rel.status}; only DRAFT can receive links.",
+        )
+
+    from_rid: Optional[int] = payload.get("from_rid")
+    from_version: Optional[str] = payload.get("from_version")
+    from_flag: Optional[Literal["latest_active"]] = payload.get("from")
+    only_existing_nodes: bool = bool(payload.get("only_existing_nodes", True))
+
+    # 1) source release 결정
+    src_rel = None
+    if from_rid:
+        src_rel = db.scalar(select(m.StdRelease).where(m.StdRelease.id == from_rid))
+    elif from_version:
+        src_rel = db.scalar(select(m.StdRelease).where(m.StdRelease.version == from_version))
+    elif from_flag == "latest_active":
+        # to_rid 이전 중 가장 최근 ACTIVE 우선, 없으면 전체 중 최신 ACTIVE
+        src_rel = db.scalar(
+            select(m.StdRelease)
+            .where(m.StdRelease.status == m.ReleaseStatus.ACTIVE, m.StdRelease.id < to_rid)
+            .order_by(m.StdRelease.id.desc())
+        ) or db.scalar(
+            select(m.StdRelease)
+            .where(m.StdRelease.status == m.ReleaseStatus.ACTIVE)
+            .order_by(m.StdRelease.id.desc())
+        )
+    else:
+        raise HTTPException(400, "Provide one of: from_rid, from_version, or from='latest_active'.")
+
+    if not src_rel:
+        raise HTTPException(404, "Source release not found")
+
+    # 2) 복사 SQL (테이블: std_wms_link, 키: wms_row_id) — 중복 방지 anti-join
+    if only_existing_nodes:
+        sql = text(
+            """
+        INSERT INTO std_wms_link (std_release_id, std_node_uid, wms_row_id)
+        SELECT :to_rid, src.std_node_uid, src.wms_row_id
+        FROM std_wms_link AS src
+        JOIN std_nodes AS n
+          ON n.std_release_id = :to_rid
+         AND n.std_node_uid   = src.std_node_uid
+        LEFT JOIN std_wms_link AS dst
+          ON dst.std_release_id = :to_rid
+         AND dst.std_node_uid  = src.std_node_uid
+         AND dst.wms_row_id    = src.wms_row_id
+        WHERE src.std_release_id = :from_rid
+          AND dst.std_release_id IS NULL
+        """
+        )
+    else:
+        sql = text(
+            """
+        INSERT INTO std_wms_link (std_release_id, std_node_uid, wms_row_id)
+        SELECT :to_rid, src.std_node_uid, src.wms_row_id
+        FROM std_wms_link AS src
+        LEFT JOIN std_wms_link AS dst
+          ON dst.std_release_id = :to_rid
+         AND dst.std_node_uid  = src.std_node_uid
+         AND dst.wms_row_id    = src.wms_row_id
+        WHERE src.std_release_id = :from_rid
+          AND dst.std_release_id IS NULL
+        """
+        )
+
+    res = db.execute(sql, {"to_rid": to_rid, "from_rid": src_rel.id})
+    db.commit()
+    copied = res.rowcount or 0
+    return {
+        "copied": max(copied, 0),
+        "to_release": {"id": to_rid, "version": to_rel.version, "status": to_rel.status.value},
+        "from_release": {
+            "id": src_rel.id,
+            "version": src_rel.version,
+            "status": src_rel.status.value,
+        },
+        "only_existing_nodes": only_existing_nodes,
+    }

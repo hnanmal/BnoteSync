@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from sqlalchemy import select, func, case
 from sqlalchemy import delete as sa_delete
+from sqlalchemy import select as sa_select, and_ as sa_and_
 from ..deps import get_db
 from . import models as m
 from . import schemas as s
@@ -13,6 +14,40 @@ import numpy as np
 
 
 router = APIRouter(prefix="/api/wms", tags=["wms"])
+
+
+# === helpers: current batch selection ===
+def _pick_current_batch_for_source(db: Session, source: str) -> Optional[m.WmsBatch]:
+    """is_current=true 우선, 없으면 validated 최신 → 없으면 가장 최신."""
+    rows = (
+        db.execute(
+            select(m.WmsBatch).where(m.WmsBatch.source == source).order_by(m.WmsBatch.id.desc())
+        )
+        .scalars()
+        .all()
+    )
+    if not rows:
+        return None
+    # 1) meta_json.is_current == True
+    for b in rows:
+        mj = b.meta_json or {}
+        if mj.get("is_current") is True:
+            return b
+    # 2) validated 최신
+    for b in rows:
+        if (b.status or "").lower() == "validated":
+            return b
+    # 3) 최신 아무거나
+    return rows[0]
+
+
+def _pick_current_batch_ids(db: Session, sources: list[str]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for s in sources:
+        b = _pick_current_batch_for_source(db, s)
+        if b:
+            out[s] = int(b.id)
+    return out
 
 
 @router.post("/ingest")
@@ -438,12 +473,15 @@ def list_links(
     rid: int = Query(..., description="std_release_id"),
     uid: str = Query(..., description="std_node_uid"),
     order: str = Query("asc", description="asc|desc"),
+    # ▼ 추가
+    source: str | None = Query(None, description="AR|FP|SS (current_only 적용하려면 지정 권장)"),
+    batch_id: int | None = Query(None, description="특정 배치만"),
+    current_only: bool = Query(True, description="기본 True: source의 current 배치만"),
     db: Session = Depends(get_db),
 ):
     if order not in ("asc", "desc"):
         raise HTTPException(400, "order must be 'asc' or 'desc'")
 
-    # std_wms_link: (std_release_id, std_node_uid, row_id)
     q = (
         select(m.WmsRow.id, m.WmsBatch.source, m.WmsRow.payload_json)
         .join(m.WmsBatch, m.WmsBatch.id == m.WmsRow.batch_id)
@@ -454,6 +492,19 @@ def list_links(
         )
         .order_by(m.WmsRow.id.asc() if order == "asc" else m.WmsRow.id.desc())
     )
+
+    # 소스 필터(있으면)
+    if source:
+        q = q.where(m.WmsBatch.source == source)
+
+    # 배치 범위 결정
+    if batch_id is not None:
+        q = q.where(m.WmsRow.batch_id == batch_id)
+    elif current_only and source:
+        cur = _pick_current_batch_for_source(db, source)
+        if cur:
+            q = q.where(m.WmsRow.batch_id == cur.id)
+
     rows = db.execute(q).all()
 
     items = []
@@ -575,3 +626,249 @@ def unassign_links(
     )
     db.commit()
     return {"removed": len(list(ids))}
+
+
+# set current for a batch
+@router.post("/batches/{batch_id}/set-current")
+def set_current_batch(batch_id: int, db: Session = Depends(get_db)):
+    batch = db.get(m.WmsBatch, batch_id)
+    if not batch:
+        raise HTTPException(404, "batch not found")
+    # 동일 source의 기존 current 해제
+    siblings = (
+        db.execute(select(m.WmsBatch).where(m.WmsBatch.source == batch.source)).scalars().all()
+    )
+    for b in siblings:
+        mj = dict(b.meta_json or {})
+        if mj.get("is_current"):
+            mj["is_current"] = False
+            b.meta_json = mj
+    # 대상 배치를 current로
+    mj = dict(batch.meta_json or {})
+    mj["is_current"] = True
+    batch.meta_json = mj
+    db.commit()
+    return {
+        "ok": True,
+        "source": batch.source,
+        "current_batch_id": int(batch.id),
+    }
+
+
+# get current for a source (편의)
+@router.get("/batches/current")
+def get_current_batch(source: str = Query(...), db: Session = Depends(get_db)):
+    b = _pick_current_batch_for_source(db, source)
+    if not b:
+        raise HTTPException(404, f"No batch for source {source}")
+    return {
+        "id": int(b.id),
+        "source": b.source,
+        "status": b.status,
+        "received_at": b.received_at,
+        "is_current": True if (b.meta_json or {}).get("is_current") else False,
+    }
+
+
+@router.post("/links/rebase")
+def rebase_links(payload: dict, db: Session = Depends(get_db)):
+    """
+    body 예:
+    {
+      "std_release_id": 2,
+      "source": "FP",
+      "to_batch_id": 12,                 # 없으면 해당 source의 current를 사용
+      "from_batch_id": 8,                # 없으면 '현재 릴리즈에서 사용 중인 이전 배치'를 추정
+      "dry_run": false,
+      "delete_old": true                 # 새 링크 추가 성공한 쌍만 old 링크 삭제
+    }
+    """
+    rid = int(payload.get("std_release_id") or 0)
+    source = (payload.get("source") or "").strip()
+    to_bid = payload.get("to_batch_id")
+    from_bid = payload.get("from_batch_id")
+    dry_run = bool(payload.get("dry_run", False))
+    delete_old = bool(payload.get("delete_old", False))
+
+    if not (rid and source):
+        raise HTTPException(400, "std_release_id and source are required")
+
+    # 대상(to) 배치 결정
+    if not to_bid:
+        to_b = _pick_current_batch_for_source(db, source)
+        if not to_b:
+            raise HTTPException(404, f"No current or recent batch found for {source}")
+        to_bid = int(to_b.id)
+    else:
+        to_b = db.get(m.WmsBatch, to_bid)
+        if not to_b:
+            raise HTTPException(404, f"to_batch_id {to_bid} not found")
+        if to_b.source != source:
+            raise HTTPException(400, f"to_batch_id {to_bid} is not for source {source}")
+
+    # 기존(from) 배치 결정: 릴리즈가 현재 참조 중인 배치를 우선 사용
+    if not from_bid:
+        # 릴리즈 내 링크들이 참조하는 row의 batch_id들을 수집, 최근(최대 id) 배치 하나를 선택
+        used_bids = (
+            db.execute(
+                select(m.WmsRow.batch_id)
+                .join(m.StdWmsLink, m.StdWmsLink.wms_row_id == m.WmsRow.id)
+                .join(m.WmsBatch, m.WmsBatch.id == m.WmsRow.batch_id)
+                .where(
+                    m.StdWmsLink.std_release_id == rid,
+                    m.WmsBatch.source == source,
+                )
+                .group_by(m.WmsRow.batch_id)
+            )
+            .scalars()
+            .all()
+        )
+        if not used_bids:
+            raise HTTPException(404, "No existing links for this release/source; nothing to rebase")
+        from_bid = int(sorted(used_bids)[-1])
+    else:
+        from_b = db.get(m.WmsBatch, from_bid)
+        if not from_b:
+            raise HTTPException(404, f"from_batch_id {from_bid} not found")
+        if from_b.source != source:
+            raise HTTPException(400, f"from_batch_id {from_bid} is not for source {source}")
+
+    if int(from_bid) == int(to_bid):
+        return {
+            "release_id": rid,
+            "source": source,
+            "from_batch_id": int(from_bid),
+            "to_batch_id": int(to_bid),
+            "inserted_new_links": 0,
+            "deleted_old_links": 0,
+            "skipped_unmatched": 0,
+            "dry_run": dry_run,
+            "note": "from == to; nothing to do",
+        }
+
+    # 1) 새/옛 배치의 code → row_id 매핑 구성
+    def _code_of_payload(payload: dict) -> Optional[str]:
+        if not isinstance(payload, dict):
+            return None
+        code = payload.get("code")
+        if isinstance(code, str):
+            code = code.strip()
+        return code or None
+
+    new_rows = db.execute(
+        select(m.WmsRow.id, m.WmsRow.payload_json)
+        .join(m.WmsBatch, m.WmsBatch.id == m.WmsRow.batch_id)
+        .where(m.WmsRow.batch_id == to_bid, m.WmsBatch.source == source)
+    ).all()
+    new_by_code: dict[str, int] = {}
+    for r in new_rows:
+        c = _code_of_payload(r.payload_json or {})
+        if c:
+            new_by_code.setdefault(c, int(r.id))
+
+    old_rows = db.execute(
+        select(m.WmsRow.id, m.WmsRow.payload_json)
+        .join(m.WmsBatch, m.WmsBatch.id == m.WmsRow.batch_id)
+        .where(m.WmsRow.batch_id == from_bid, m.WmsBatch.source == source)
+    ).all()
+    old_id_to_code: dict[int, str] = {}
+    for r in old_rows:
+        c = _code_of_payload(r.payload_json or {})
+        if c:
+            old_id_to_code[int(r.id)] = c
+
+    if not new_by_code:
+        raise HTTPException(404, f"No rows with code in to_batch_id={to_bid}")
+
+    # 2) 릴리즈에서 '옛 배치'를 참조 중인 링크들 나열
+    old_links = db.execute(
+        select(m.StdWmsLink.std_node_uid, m.StdWmsLink.wms_row_id)
+        .join(m.WmsRow, m.WmsRow.id == m.StdWmsLink.wms_row_id)
+        .join(m.WmsBatch, m.WmsBatch.id == m.WmsRow.batch_id)
+        .where(
+            m.StdWmsLink.std_release_id == rid,
+            m.WmsBatch.source == source,
+            m.WmsRow.batch_id == from_bid,
+        )
+    ).all()
+
+    if not old_links:
+        return {
+            "release_id": rid,
+            "source": source,
+            "from_batch_id": int(from_bid),
+            "to_batch_id": int(to_bid),
+            "inserted_new_links": 0,
+            "deleted_old_links": 0,
+            "skipped_unmatched": 0,
+            "dry_run": dry_run,
+            "note": "No old links to rebase",
+        }
+
+    # 3) 이미 존재하는 (release,node,new_row) 링크는 중복 방지
+    new_row_ids = set(new_by_code.values())
+    existing_new = set(
+        db.execute(
+            select(m.StdWmsLink.std_node_uid, m.StdWmsLink.wms_row_id).where(
+                m.StdWmsLink.std_release_id == rid,
+                m.StdWmsLink.wms_row_id.in_(new_row_ids),
+            )
+        ).all()
+    )
+
+    to_insert: list[m.StdWmsLink] = []
+    replaced_pairs: list[tuple[str, int]] = []  # (node_uid, old_row_id)
+    skipped = 0
+
+    for node_uid, old_row_id in old_links:
+        code = old_id_to_code.get(int(old_row_id))
+        if not code:
+            skipped += 1
+            continue
+        new_row_id = new_by_code.get(code)
+        if not new_row_id:
+            skipped += 1
+            continue
+        key = (node_uid, int(new_row_id))
+        if key in existing_new:
+            # 이미 새 링크가 있으면 old 삭제만 후보에 올림
+            replaced_pairs.append((node_uid, int(old_row_id)))
+            continue
+        to_insert.append(
+            m.StdWmsLink(std_release_id=rid, std_node_uid=node_uid, wms_row_id=int(new_row_id))
+        )
+        replaced_pairs.append((node_uid, int(old_row_id)))
+
+    inserted = 0
+    deleted = 0
+
+    if not dry_run and to_insert:
+        db.add_all(to_insert)
+        db.flush()
+        inserted = len(to_insert)
+
+    # if not dry_run and delete_old and replaced_pairs:
+    #     # 개별 삭제 (정밀): (rid, node_uid, old_row_id) 쌍만 삭제
+    #     for node_uid, old_row_id in replaced_pairs:
+    #         db.execute(
+    #             sa_delete(m.StdWmsLink).where(
+    #                 m.StdWmsLink.std_release_id == rid,
+    #                 m.StdWmsLink.std_node_uid == node_uid,
+    #                 m.StdWmsLink.wms_row_id == old_row_id,
+    #             )
+    #         )
+    #     deleted = len(replaced_pairs)
+
+    if not dry_run:
+        db.commit()
+
+    return {
+        "release_id": rid,
+        "source": source,
+        "from_batch_id": int(from_bid),
+        "to_batch_id": int(to_bid),
+        "inserted_new_links": inserted,
+        "deleted_old_links": deleted if delete_old else 0,
+        "skipped_unmatched": skipped,
+        "dry_run": dry_run,
+    }

@@ -42,6 +42,9 @@ export const cloneRelease = async (rid, { version, copyLinks = true } = {}) =>
 export const setReleaseStatus = async (rid, status) =>
   (await api.patch(`/std/releases/${rid}/status`, { status })).data;
 
+export const copyLinksFromRelease = async (toRid, fromRid) =>
+  (await api.post(`/std/releases/${toRid}/links/copy-from/${fromRid}`)).data;
+
 // wms.js (추가)
 export const listWmsItems = async ({ sources, search, limit, offset=0 } = {}) => {
   const params = {};
@@ -51,6 +54,9 @@ export const listWmsItems = async ({ sources, search, limit, offset=0 } = {}) =>
   if (offset) params.offset = offset;
   return (await api.get("/wms/items", { params })).data;
 };
+
+export const copyLinks = async (toRid, body) =>
+  (await api.post(`/std/releases/${toRid}/links/copy`, body)).data;
 
 export const listLinks = async ({ rid, uid }) =>
   (await api.get("/wms/links", { params: { std_release_id: rid, std_node_uid: uid } })).data;
