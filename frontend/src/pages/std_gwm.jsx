@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState, useTransition, useRef } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, useQueries } from "@tanstack/react-query";
 import {
   listStdReleases, getStdTree, createStdNode, updateStdNode, deleteStdNode, cloneRelease, setReleaseStatus,copyLinksFromRelease,
 } from "../shared/api/std";
 import {
-  listWmsItems, listLinks, assignLinks, unassignLinks
+  listWmsItems, listLinks, assignLinks, unassignLinks, listBatches
 } from "../shared/api/wms";
 import { buildOrderedRawColumns, normalizeLabel } from "../shared/api/columnOrder";
 import { useResizableColumns, ResizableTH, ResizableColgroup } from "../shared/ui/resizableColumns";
@@ -143,12 +143,26 @@ export default function StdGwmPage() {
   const [searchApplied, setSearchApplied] = useState("");
   const isComposing = useRef(false);
   const applySearch = () => setSearchApplied(searchDraft.trim());
-  const sourcesKey = useMemo(()=> (sources||[]).join(","), [sources]);
+  const singleSource = sources.length === 1 ? sources[0] : null;
+  const [selectedBatchId, setSelectedBatchId] = useState(null);
+  // ▼ 소스별 선택 배치 상태
+  const [selectedBatches, setSelectedBatches] = useState({ AR: null, FP: null, SS: null });
   const [selRowIds, setSelRowIds] = useState(new Set());
   const [selLinkIds, setSelLinkIds] = useState(new Set());
   const [pageSize, setPageSize] = useState(200);
   const [order, setOrder] = useState("asc");
   
+  useEffect(() => { setSelectedBatchId(null); }, [singleSource]); // 소스 바뀌면 초기화
+
+  // 소스 체크 변화 시, 선택 상태에서 없는 소스 키는 제거
+  useEffect(() => {
+    setSelectedBatches(prev => {
+      const next = {};
+      (sources || []).forEach(s => { next[s] = prev[s] ?? null; });
+      return next;
+    });
+  }, [sources]);
+
   useEffect(() => {
     setSelectedNode(null);
     setSelRowIds(new Set());
@@ -213,15 +227,44 @@ export default function StdGwmPage() {
 
   const isLevel2 = selectedDepth === 3;
 
+  // 소스별 배치 목록 fetch
+  const batchQueries = useQueries({
+    queries: (sources || []).map(src => ({
+      queryKey: ["wms","batches", src],
+      enabled: true,
+      queryFn: () => listBatches({ source: src, limit: 50 }),
+    })),
+  });
+  // 소스 → 배치목록 매핑
+  const batchesBySource = useMemo(() => {
+    const map = {};
+    (sources || []).forEach((s, i) => { map[s] = batchQueries[i]?.data || []; });
+    return map;
+  }, [sources, batchQueries]);
+
+  // 선택된 배치들의 합집합 → API에 넘길 값
+  const selectedBatchIds = useMemo(() =>
+    Object.values(selectedBatches || {}).filter(v => Number.isFinite(v)), [selectedBatches]
+  );
+  const sourcesKey = useMemo(()=> (sources||[]).join(","), [sources]);
+
+  // // 배치 목록 (단일 소스일 때만)
+  // const batchesQ = useQuery({
+  //   enabled: !!singleSource,
+  //   queryKey: ["wms","batches", singleSource],
+  //   queryFn: () => listBatches({ source: singleSource, limit: 50 }),
+  // });
+
   // WMS items
   const itemsQ = useQuery({
-    queryKey: ["wms","items", sourcesKey, searchApplied, pageSize, order],
+    queryKey: ["wms","items", sourcesKey, searchApplied, pageSize, order, selectedBatchIds.join(",")],
     queryFn: ({ signal }) =>
       listWmsItems({
         sources,
         search: searchApplied,
         limit: pageSize === 'ALL' ? undefined : pageSize,
         order,
+        batch_ids: selectedBatchIds.length ? selectedBatchIds : undefined,
       }, { signal }),
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
@@ -272,13 +315,14 @@ export default function StdGwmPage() {
 
   const linksQ = useQuery({
     enabled: !!(rid && selectedNode),
-    queryKey: ["wms","links", rid, selectedNode?.std_node_uid, linkSource],
+    queryKey: ["wms","links", rid, selectedNode?.std_node_uid, sourcesKey, selectedBatchIds.join(",")],
     queryFn: () => listLinks({
       rid,
       uid: selectedNode.std_node_uid,
-      source: linkSource,        // 단일 소스일 때만 지정
-      current_only: true,        // 기본 current만
-      // 배치 잠금이 필요하면 batch_id도 넘겨주세요
+      // source: singleSource ?? undefined,        // 단일 소스일 때만 지정
+      // current_only: true,        // 기본 current만
+      batch_ids: selectedBatchIds.length ? selectedBatchIds : undefined,
+      order: "asc",
     }),
   });
 
@@ -686,6 +730,31 @@ export default function StdGwmPage() {
                   {s}
                 </label>
               ))}
+              {/* 기존 Filter 체크박스들 옆에, 소스별 배치 선택 드롭다운들 */}
+              <div className="flex items-center gap-2 flex-wrap">
+                {["AR","FP","SS"].map(src => (
+                  sources.includes(src) ? (
+                    <div key={src} className="flex items-center gap-1">
+                      <label className="text-sm">{src} Batch:</label>
+                      <select
+                        className="border rounded px-2 py-1 text-sm"
+                        value={selectedBatches[src] ?? ""}
+                        onChange={(e)=>{
+                          const v = e.target.value ? Number(e.target.value) : null;
+                          setSelectedBatches(prev => ({ ...prev, [src]: v }));
+                        }}
+                      >
+                        <option value="">(All / Current)</option>
+                        {(batchesBySource[src] || []).map(b => (
+                          <option key={b.id} value={b.id}>
+                            #{b.id} [{b.status}] total:{b.total_rows}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : null
+                ))}
+              </div>
               <div className="ml-auto flex items-center gap-2">
                 <input
                   className="border rounded px-2 py-1 text-sm"

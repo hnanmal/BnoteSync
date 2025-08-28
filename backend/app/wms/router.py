@@ -75,12 +75,17 @@ def ingest(payload: s.WmsIngestRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
+# /api/wms/batches  (기존 함수 교체)
 @router.get("/batches")
-def list_batches(db: Session = Depends(get_db)):
-    # 집계: total_rows, error_rows, ok_rows
+def list_batches(
+    source: str | None = Query(None, description="AR|FP|SS"),
+    limit: int | None = Query(None, ge=1),
+    db: Session = Depends(get_db),
+):
     total = func.count(m.WmsRow.id)
     errors = func.sum(case((m.WmsRow.status == "error", 1), else_=0))
     oks = func.sum(case((m.WmsRow.status == "ok", 1), else_=0))
+
     q = (
         select(
             m.WmsBatch.id,
@@ -96,6 +101,11 @@ def list_batches(db: Session = Depends(get_db)):
         .group_by(m.WmsBatch.id)
         .order_by(m.WmsBatch.id.desc())
     )
+    if source:
+        q = q.where(m.WmsBatch.source == source)
+    if limit:
+        q = q.limit(limit)
+
     rows = db.execute(q).all()
     return [
         {
@@ -111,7 +121,43 @@ def list_batches(db: Session = Depends(get_db)):
     ]
 
 
-@router.get("/batches/{batch_id}/preview", response_model=list[s.WmsRowOut])
+# @router.get("/batches")
+# def list_batches(db: Session = Depends(get_db)):
+#     # 집계: total_rows, error_rows, ok_rows
+#     total = func.count(m.WmsRow.id)
+#     errors = func.sum(case((m.WmsRow.status == "error", 1), else_=0))
+#     oks = func.sum(case((m.WmsRow.status == "ok", 1), else_=0))
+#     q = (
+#         select(
+#             m.WmsBatch.id,
+#             m.WmsBatch.source,
+#             m.WmsBatch.status,
+#             m.WmsBatch.received_at,
+#             total.label("total_rows"),
+#             errors.label("error_rows"),
+#             oks.label("ok_rows"),
+#         )
+#         .select_from(m.WmsBatch)
+#         .join(m.WmsRow, m.WmsRow.batch_id == m.WmsBatch.id, isouter=True)
+#         .group_by(m.WmsBatch.id)
+#         .order_by(m.WmsBatch.id.desc())
+#     )
+#     rows = db.execute(q).all()
+#     return [
+#         {
+#             "id": r.id,
+#             "source": r.source,
+#             "status": r.status,
+#             "received_at": r.received_at,
+#             "total_rows": int(r.total_rows or 0),
+#             "error_rows": int(r.error_rows or 0),
+#             "ok_rows": int(r.ok_rows or 0),
+#         }
+#         for r in rows
+#     ]
+
+
+# @router.get("/batches/{batch_id}/preview", response_model=list[s.WmsRowOut])
 def preview_batch(
     batch_id: int,
     # ✅ limit을 선택값으로. None이면 전체 반환
@@ -397,27 +443,37 @@ def delete_batch(batch_id: int, db: Session = Depends(get_db)):
 # 통합 아이템 목록 (AR/FP/SS 통합, 필터/검색/페이지네이션)
 @router.get("/items")
 def list_items(
-    sources: Optional[str] = Query(None, description="쉼표구분: AR,FP,SS"),
-    search: Optional[str] = Query(None, description="code/name/원본(raw) 부분검색"),
-    limit: int | None = Query(None),  # ✅ ALL 지원: 기본 None
+    sources: Optional[str] = Query(None, description="AR,FP,SS"),
+    search: Optional[str] = Query(None),
+    limit: int | None = Query(None),
     offset: int = Query(0, ge=0),
-    order: str = Query("asc", description="asc|desc"),  # ✅ 기본 asc
+    order: str = Query("asc"),
+    batch_id: int | None = Query(None, description="이 배치의 행만 조회"),
+    batch_ids: str | None = Query(None, description="쉼표구분 배치들: '7,8,12'"),
     db: Session = Depends(get_db),
 ):
     if order not in ("asc", "desc"):
         raise HTTPException(400, "order must be 'asc' or 'desc'")
 
-    src_list: Optional[list[str]] = None
-    if sources:
-        src_list = [s.strip() for s in sources.split(",") if s.strip()]
+    src_list = [s.strip() for s in sources.split(",")] if sources else None
+    ids_list = None
+    if batch_ids:
+        try:
+            ids_list = [int(x) for x in batch_ids.split(",") if x.strip()]
+        except Exception:
+            raise HTTPException(400, "batch_ids must be comma-separated integers")
 
     q = (
-        select(m.WmsRow.id, m.WmsBatch.source, m.WmsRow.payload_json)
+        select(m.WmsRow.id, m.WmsBatch.source, m.WmsRow.payload_json, m.WmsRow.batch_id)
         .join(m.WmsBatch, m.WmsBatch.id == m.WmsRow.batch_id)
         .order_by(m.WmsRow.id.asc() if order == "asc" else m.WmsRow.id.desc())
     )
     if src_list:
         q = q.where(m.WmsBatch.source.in_(src_list))
+    if ids_list:
+        q = q.where(m.WmsRow.batch_id.in_(ids_list))
+    elif batch_id is not None:
+        q = q.where(m.WmsRow.batch_id == batch_id)
 
     rows = db.execute(q).all()
     s_lower = (search or "").lower()
@@ -465,25 +521,102 @@ def list_items(
     return items
 
 
+# @router.get("/items")
+# def list_items(
+#     sources: Optional[str] = Query(None, description="쉼표구분: AR,FP,SS"),
+#     search: Optional[str] = Query(None, description="code/name/원본(raw) 부분검색"),
+#     limit: int | None = Query(None),  # ✅ ALL 지원: 기본 None
+#     offset: int = Query(0, ge=0),
+#     order: str = Query("asc", description="asc|desc"),  # ✅ 기본 asc
+#     batch_id: int | None = Query(None, description="이 배치의 행만 조회"),
+#     db: Session = Depends(get_db),
+# ):
+#     if order not in ("asc", "desc"):
+#         raise HTTPException(400, "order must be 'asc' or 'desc'")
+
+#     src_list: Optional[list[str]] = None
+#     if sources:
+#         src_list = [s.strip() for s in sources.split(",") if s.strip()]
+
+#     q = (
+#         select(m.WmsRow.id, m.WmsBatch.source, m.WmsRow.payload_json)
+#         .join(m.WmsBatch, m.WmsBatch.id == m.WmsRow.batch_id)
+#         .order_by(m.WmsRow.id.asc() if order == "asc" else m.WmsRow.id.desc())
+#     )
+#     if src_list:
+#         q = q.where(m.WmsBatch.source.in_(src_list))
+
+#     rows = db.execute(q).all()
+#     s_lower = (search or "").lower()
+#     items = []
+
+#     for r in rows:
+#         p = r.payload_json or {}
+#         raw = p.get("_raw") if isinstance(p, dict) else {}
+#         code = (p.get("code") or "") if isinstance(p, dict) else ""
+#         name = (p.get("name") or "") if isinstance(p, dict) else ""
+
+#         # ✅ 검색: code/name + raw 전체 값에서 부분일치
+#         if s_lower:
+#             hit = any(s_lower in str(v).lower() for v in (code, name))
+#             if not hit and isinstance(raw, dict):
+#                 for v in raw.values():
+#                     try:
+#                         if s_lower in str(v).lower():
+#                             hit = True
+#                             break
+#                     except Exception:
+#                         pass
+#             if not hit:
+#                 continue
+
+#         items.append(
+#             {
+#                 "row_id": int(r.id),
+#                 "source": r.source,
+#                 "code": code,
+#                 "name": name,
+#                 "unit": (p.get("unit") if isinstance(p, dict) else None),
+#                 "qty": (p.get("qty") if isinstance(p, dict) else None),
+#                 "_raw": raw,  # ✅ 프론트가 여기서 모든 컬럼을 꺼내 쓸 것
+#             }
+#         )
+
+#     # ✅ 검색 후 최종 정렬
+#     items.sort(key=lambda x: x["row_id"], reverse=(order == "desc"))
+
+#     # ✅ 정렬 이후 슬라이스
+#     if limit is not None:
+#         items = items[offset : offset + limit]
+
+#     return items
+
+
 # 특정 노드의 링크 목록 (현재 할당됨)
 
 
 @router.get("/links", response_model=list[s.WmsLinkedItemOut])
 def list_links(
-    rid: int = Query(..., description="std_release_id"),
-    uid: str = Query(..., description="std_node_uid"),
-    order: str = Query("asc", description="asc|desc"),
-    # ▼ 추가
-    source: str | None = Query(None, description="AR|FP|SS (current_only 적용하려면 지정 권장)"),
-    batch_id: int | None = Query(None, description="특정 배치만"),
-    current_only: bool = Query(True, description="기본 True: source의 current 배치만"),
+    rid: int = Query(...),
+    uid: str = Query(...),
+    order: str = Query("asc"),
+    source: str | None = Query(None, description="AR|FP|SS"),
+    batch_id: int | None = Query(None, description="이 배치의 링크만"),
+    batch_ids: str | None = Query(None, description="쉼표구분 배치들"),
     db: Session = Depends(get_db),
 ):
     if order not in ("asc", "desc"):
         raise HTTPException(400, "order must be 'asc' or 'desc'")
 
+    ids_list = None
+    if batch_ids:
+        try:
+            ids_list = [int(x) for x in batch_ids.split(",") if x.strip()]
+        except Exception:
+            raise HTTPException(400, "batch_ids must be comma-separated integers")
+
     q = (
-        select(m.WmsRow.id, m.WmsBatch.source, m.WmsRow.payload_json)
+        select(m.WmsRow.id, m.WmsBatch.source, m.WmsRow.payload_json, m.WmsRow.batch_id)
         .join(m.WmsBatch, m.WmsBatch.id == m.WmsRow.batch_id)
         .join(m.StdWmsLink, m.StdWmsLink.wms_row_id == m.WmsRow.id)
         .where(
@@ -492,39 +625,85 @@ def list_links(
         )
         .order_by(m.WmsRow.id.asc() if order == "asc" else m.WmsRow.id.desc())
     )
-
-    # 소스 필터(있으면)
     if source:
         q = q.where(m.WmsBatch.source == source)
-
-    # 배치 범위 결정
-    if batch_id is not None:
+    if ids_list:
+        q = q.where(m.WmsRow.batch_id.in_(ids_list))
+    elif batch_id is not None:
         q = q.where(m.WmsRow.batch_id == batch_id)
-    elif current_only and source:
-        cur = _pick_current_batch_for_source(db, source)
-        if cur:
-            q = q.where(m.WmsRow.batch_id == cur.id)
 
     rows = db.execute(q).all()
+    return [
+        {
+            "row_id": int(r.id),
+            "source": r.source,
+            "code": (r.payload_json or {}).get("code") or "",
+            "name": (r.payload_json or {}).get("name") or "",
+            "unit": (r.payload_json or {}).get("unit"),
+            "qty": (r.payload_json or {}).get("qty"),
+            "_raw": (r.payload_json or {}).get("_raw") or {},
+        }
+        for r in rows
+    ]
 
-    items = []
-    for r in rows:
-        p = r.payload_json or {}
-        raw = p.get("_raw") if isinstance(p, dict) else {}
-        code = (p.get("code") or "") if isinstance(p, dict) else ""
-        name = (p.get("name") or "") if isinstance(p, dict) else ""
-        items.append(
-            {
-                "row_id": int(r.id),
-                "source": r.source,
-                "code": code,
-                "name": name,
-                "unit": (p.get("unit") if isinstance(p, dict) else None),
-                "qty": (p.get("qty") if isinstance(p, dict) else None),
-                "_raw": raw,  # ✅ 원본 모든 컬럼
-            }
-        )
-    return items
+
+# @router.get("/links", response_model=list[s.WmsLinkedItemOut])
+# def list_links(
+#     rid: int = Query(..., description="std_release_id"),
+#     uid: str = Query(..., description="std_node_uid"),
+#     order: str = Query("asc", description="asc|desc"),
+#     # ▼ 추가
+#     source: str | None = Query(None, description="AR|FP|SS (current_only 적용하려면 지정 권장)"),
+#     batch_id: int | None = Query(None, description="특정 배치만"),
+#     current_only: bool = Query(True, description="기본 True: source의 current 배치만"),
+#     db: Session = Depends(get_db),
+# ):
+#     if order not in ("asc", "desc"):
+#         raise HTTPException(400, "order must be 'asc' or 'desc'")
+
+#     q = (
+#         select(m.WmsRow.id, m.WmsBatch.source, m.WmsRow.payload_json)
+#         .join(m.WmsBatch, m.WmsBatch.id == m.WmsRow.batch_id)
+#         .join(m.StdWmsLink, m.StdWmsLink.wms_row_id == m.WmsRow.id)
+#         .where(
+#             m.StdWmsLink.std_release_id == rid,
+#             m.StdWmsLink.std_node_uid == uid,
+#         )
+#         .order_by(m.WmsRow.id.asc() if order == "asc" else m.WmsRow.id.desc())
+#     )
+
+#     # 소스 필터(있으면)
+#     if source:
+#         q = q.where(m.WmsBatch.source == source)
+
+#     # 배치 범위 결정
+#     if batch_id is not None:
+#         q = q.where(m.WmsRow.batch_id == batch_id)
+#     elif current_only and source:
+#         cur = _pick_current_batch_for_source(db, source)
+#         if cur:
+#             q = q.where(m.WmsRow.batch_id == cur.id)
+
+#     rows = db.execute(q).all()
+
+#     items = []
+#     for r in rows:
+#         p = r.payload_json or {}
+#         raw = p.get("_raw") if isinstance(p, dict) else {}
+#         code = (p.get("code") or "") if isinstance(p, dict) else ""
+#         name = (p.get("name") or "") if isinstance(p, dict) else ""
+#         items.append(
+#             {
+#                 "row_id": int(r.id),
+#                 "source": r.source,
+#                 "code": code,
+#                 "name": name,
+#                 "unit": (p.get("unit") if isinstance(p, dict) else None),
+#                 "qty": (p.get("qty") if isinstance(p, dict) else None),
+#                 "_raw": raw,  # ✅ 원본 모든 컬럼
+#             }
+#         )
+#     return items
 
 
 # @router.get("/links")

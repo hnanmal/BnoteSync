@@ -6,10 +6,14 @@ export const ingestWms = async (payload) => {
   return data;
 };
 
-export const listBatches = async () => {
-  const { data } = await api.get("/wms/batches");
-  return data;
-};
+
+export const listBatches = async (params={}) =>
+  (await api.get("/wms/batches", { params })).data;
+
+// export const listBatches = async () => {
+//   const { data } = await api.get("/wms/batches");
+//   return data;
+// };
 
 export const previewBatch = async (batchId, { limit, offset = 0 } = {}) => {
   const params = {};
@@ -49,44 +53,48 @@ export const deleteBatch = async (batchId) => {
 };
 
 // --- StdGWM용 신규 함수들 ---
-export async function listWmsItems(args = {}, { signal } = {}) {
-  const { sources, search, order = "asc", limit, offset, columns } = args;
+export const listWmsItems = async ({
+  sources, search, limit, offset=0, order, batch_id, batch_ids
+} = {}) => {
   const params = {};
-  if (Array.isArray(sources) && sources.length) params.sources = sources.join(","); // ✅ CSV 필수
+  if (sources?.length) params.sources = sources.join(",");
   if (search) params.search = search;
-  params.order = order;
   if (limit != null) params.limit = limit;
-  if (offset != null) params.offset = offset;
-  if (Array.isArray(columns) && columns.length) params.columns = columns.join(",");
+  if (offset) params.offset = offset;
+  if (order) params.order = order;
+  if (batch_ids?.length) params.batch_ids = batch_ids.join(",");
+  else if (batch_id != null) params.batch_id = batch_id;
+  return (await api.get("/wms/items", { params })).data;
+};
 
-  const res = await api.get("/wms/items", {
-    params,
-    signal,
-    headers: { Accept: "application/json" }, // ✅ SPA fallback(HTML) 회피
-  });
-
-  const ct = (res.headers?.["content-type"] || "").toLowerCase();
-  if (typeof res.data === "string" && ct.includes("text/html")) {
-    throw new Error("HTML received from /wms/items — check proxy/baseURL");
-  }
-
-  return res.data; // 배열 or {total,columns,items}
-}
-// // export const listWmsItems = async ({ sources, search, limit, offset = 0, order = "asc" } = {}) => {
-// export async function listWmsItems({ sources, search, order="asc", limit, offset, columns }, { signal } = {}) {
+// export const listWmsItems = async ({ sources, search, limit, offset=0, order, batch_id } = {}) => {
 //   const params = {};
 //   if (sources?.length) params.sources = sources.join(",");
 //   if (search) params.search = search;
-//   if (Number.isFinite(limit)) params.limit = limit;
+//   if (limit != null) params.limit = limit;
 //   if (offset) params.offset = offset;
-//   if (order) params.order = order;           // ✅ asc|desc
-//   const { data } = await axios.get("/api/wms/items", { params, signal });
-//   // return (await api.get("/wms/items", { params })).data;
-//   return data
+//   if (order) params.order = order;
+//   if (batch_id != null) params.batch_id = batch_id;
+//   return (await api.get("/wms/items", { params })).data;
 // };
 
-export const listLinks = async ({ rid, uid, order = "asc" }) =>
-  (await api.get("/wms/links", { params: { rid, uid, order } })).data;
+export const listLinks = async ({ rid, uid, order, source, batch_id, batch_ids }) =>
+  (await api.get("/wms/links", {
+    params: {
+      rid, uid, order,
+      source,
+      ...(batch_ids?.length ? { batch_ids: batch_ids.join(",") } : {}),
+      ...(batch_id != null ? { batch_id } : {}),
+    }
+  })).data;
+  
+// export const listLinks = async ({ rid, uid, order, source, batch_id }) =>
+//   (await api.get("/wms/links", { params: {
+//     rid, uid, order, source, batch_id
+//   }})).data;
+
+// // export const listLinks = async ({ rid, uid, order = "asc" }) =>
+// //   (await api.get("/wms/links", { params: { rid, uid, order } })).data;
 
 export const assignLinks = async ({ rid, uid, row_ids }) =>
   (await api.post("/wms/links/assign", { std_release_id: rid, std_node_uid: uid, row_ids })).data;
