@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select, func, case
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import select as sa_select, and_ as sa_and_
+import sqlalchemy as sa  # ✅ 추가
 from ..deps import get_db
 from . import models as m
 from . import schemas as s
@@ -92,6 +93,7 @@ def list_batches(
             m.WmsBatch.source,
             m.WmsBatch.status,
             m.WmsBatch.received_at,
+            m.WmsBatch.meta_json,
             total.label("total_rows"),
             errors.label("error_rows"),
             oks.label("ok_rows"),
@@ -116,6 +118,7 @@ def list_batches(
             "total_rows": int(r.total_rows or 0),
             "error_rows": int(r.error_rows or 0),
             "ok_rows": int(r.ok_rows or 0),
+            "is_current": bool((r.meta_json or {}).get("is_current")),  # ✅ mj 대신 inline
         }
         for r in rows
     ]
@@ -785,7 +788,7 @@ def rebase_links(payload: dict, db: Session = Depends(get_db)):
 
     # 3) 이미 존재하는 (release,node,new_row) 링크는 중복 방지
     new_row_ids = set(new_by_code.values())
-    existing_new = set(
+    existing_new_rows = set(
         db.execute(
             select(m.StdWmsLink.std_node_uid, m.StdWmsLink.wms_row_id).where(
                 m.StdWmsLink.std_release_id == rid,
@@ -793,6 +796,8 @@ def rebase_links(payload: dict, db: Session = Depends(get_db)):
             )
         ).all()
     )
+    # ✅ 진짜 튜플 셋으로 변환
+    existing_new = {(row[0], int(row[1])) for row in existing_new_rows}
 
     to_insert: list[m.StdWmsLink] = []
     replaced_pairs: list[tuple[str, int]] = []  # (node_uid, old_row_id)
@@ -825,17 +830,16 @@ def rebase_links(payload: dict, db: Session = Depends(get_db)):
         db.flush()
         inserted = len(to_insert)
 
-    # if not dry_run and delete_old and replaced_pairs:
-    #     # 개별 삭제 (정밀): (rid, node_uid, old_row_id) 쌍만 삭제
-    #     for node_uid, old_row_id in replaced_pairs:
-    #         db.execute(
-    #             sa_delete(m.StdWmsLink).where(
-    #                 m.StdWmsLink.std_release_id == rid,
-    #                 m.StdWmsLink.std_node_uid == node_uid,
-    #                 m.StdWmsLink.wms_row_id == old_row_id,
-    #             )
-    #         )
-    #     deleted = len(replaced_pairs)
+    # ✅ 선택적 삭제: 새 링크가 들어간 동일 (node_uid)에서만 old 링크 제거
+    if not dry_run and delete_old and replaced_pairs:
+        triples = [(rid, node_uid, old_row_id) for (node_uid, old_row_id) in replaced_pairs]
+        cond = sa.tuple_(
+            m.StdWmsLink.std_release_id,
+            m.StdWmsLink.std_node_uid,
+            m.StdWmsLink.wms_row_id,
+        ).in_(triples)
+        res = db.execute(sa_delete(m.StdWmsLink).where(cond))
+        deleted = max(res.rowcount or 0, 0)
 
     if not dry_run:
         db.commit()

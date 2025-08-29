@@ -168,6 +168,9 @@ def create_release(payload: s.StdReleaseCreate, db: Session = Depends(get_db)):
 
 
 # ⭐ 새 드래프트(복제) 엔드포인트
+# ... 파일 상단/중앙부는 동일 ...
+
+
 @router.post("/releases/{rid}/clone", response_model=s.StdReleaseOut)
 def clone_release(rid: int, payload: s.StdReleaseCloneIn, db: Session = Depends(get_db)):
     base = db.scalar(select(m.StdRelease).where(m.StdRelease.id == rid))
@@ -211,25 +214,90 @@ def clone_release(rid: int, payload: s.StdReleaseCloneIn, db: Session = Depends(
     ).where(m.StdNode.std_release_id == rid)
     db.execute(sa.insert(m.StdNode).from_select(cols, sel))
 
-    # (선택) wms_links 복제: 존재 시에만 진행
+    # (선택) 링크 복제: std_wms_link (안티조인으로 중복 방지)
     if payload.copy_links:
-        try:
-            from ..wms import models as wm
-
-            link_cols = ["std_release_id", "std_node_uid", "row_id"]
-            link_sel = sa.select(
-                sa.literal(new_rel.id).label("std_release_id"),
-                wm.WmsLink.std_node_uid,
-                wm.WmsLink.row_id,
-            ).where(wm.WmsLink.std_release_id == rid)
-            db.execute(sa.insert(wm.WmsLink).from_select(link_cols, link_sel))
-        except Exception:
-            # wms_links 모델이 없거나 스키마가 다르면 무시하고 진행
-            pass
+        sql = text(
+            """
+            INSERT INTO std_wms_link (std_release_id, std_node_uid, wms_row_id)
+            SELECT :to_rid, src.std_node_uid, src.wms_row_id
+            FROM std_wms_link AS src
+            LEFT JOIN std_wms_link AS dst
+              ON dst.std_release_id = :to_rid
+             AND dst.std_node_uid   = src.std_node_uid
+             AND dst.wms_row_id     = src.wms_row_id
+            WHERE src.std_release_id = :from_rid
+              AND dst.std_release_id IS NULL
+            """
+        )
+        db.execute(sql, {"to_rid": new_rel.id, "from_rid": rid})
 
     db.commit()
     db.refresh(new_rel)
     return new_rel
+
+
+# @router.post("/releases/{rid}/clone", response_model=s.StdReleaseOut)
+# def clone_release(rid: int, payload: s.StdReleaseCloneIn, db: Session = Depends(get_db)):
+#     base = db.scalar(select(m.StdRelease).where(m.StdRelease.id == rid))
+#     if not base:
+#         raise HTTPException(404, "Base release not found")
+
+#     # 버전 유니크
+#     exists = db.scalar(select(m.StdRelease).where(m.StdRelease.version == payload.version))
+#     if exists:
+#         raise HTTPException(409, "version already exists")
+
+#     # 새 릴리즈 (항상 DRAFT)
+#     new_rel = m.StdRelease(version=payload.version, status=m.ReleaseStatus.DRAFT)
+#     db.add(new_rel)
+#     db.flush()  # new_rel.id 확보
+
+#     # std_nodes 복제 (INSERT ... SELECT)
+#     cols = [
+#         "std_release_id",
+#         "std_node_uid",
+#         "parent_uid",
+#         "name",
+#         "level",
+#         "order_index",
+#         "path",
+#         "parent_path",
+#         "values_json",
+#         "std_kind",
+#     ]
+#     sel = sa.select(
+#         sa.literal(new_rel.id).label("std_release_id"),
+#         m.StdNode.std_node_uid,
+#         m.StdNode.parent_uid,
+#         m.StdNode.name,
+#         m.StdNode.level,
+#         m.StdNode.order_index,
+#         m.StdNode.path,
+#         m.StdNode.parent_path,
+#         m.StdNode.values_json,
+#         m.StdNode.std_kind,
+#     ).where(m.StdNode.std_release_id == rid)
+#     db.execute(sa.insert(m.StdNode).from_select(cols, sel))
+
+#     # (선택) wms_links 복제: 존재 시에만 진행
+#     if payload.copy_links:
+#         try:
+#             from ..wms import models as wm
+
+#             link_cols = ["std_release_id", "std_node_uid", "row_id"]
+#             link_sel = sa.select(
+#                 sa.literal(new_rel.id).label("std_release_id"),
+#                 wm.WmsLink.std_node_uid,
+#                 wm.WmsLink.row_id,
+#             ).where(wm.WmsLink.std_release_id == rid)
+#             db.execute(sa.insert(wm.WmsLink).from_select(link_cols, link_sel))
+#         except Exception:
+#             # wms_links 모델이 없거나 스키마가 다르면 무시하고 진행
+#             pass
+
+#     db.commit()
+#     db.refresh(new_rel)
+#     return new_rel
 
 
 # ⭐ 릴리즈 상태 변경
